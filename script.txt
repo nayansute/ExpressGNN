@@ -1,0 +1,2631 @@
+Remember the code:
+
+./common/cmd_args.py:
+    import argparse
+    from os.path import join as joinpath
+    from common.utils import get_time_stamp
+
+
+    cmd_opt = argparse.ArgumentParser(description='argparser')
+
+    cmd_opt.add_argument('-embedding_size', default=128, type=int, help='embedding size')
+    cmd_opt.add_argument('-gcn_free_size', default=64, type=int, help='embedding size of GCN concat params')
+    cmd_opt.add_argument('-slice_dim', default=32, type=int, help='slice dimension of posterior params')
+    cmd_opt.add_argument('-data_root', default='../data/kinship', help='root of data_process')
+    cmd_opt.add_argument('-rule_filename', default='cleaned_rules_weight_larger_than_0.9.txt', help='rule file name')
+    cmd_opt.add_argument('-exp_folder', default='../exp', help='folder for experiment')
+    cmd_opt.add_argument('-exp_name', default='default_exp', help='name of the experiment')
+    cmd_opt.add_argument('-model_load_path', default=None, help='path to load the trained model')
+    cmd_opt.add_argument('-no_train', default=0, type=int, help='set to 1 for evaluation only')
+    cmd_opt.add_argument('-transe_data_root', default='baselines/KB2E/data', type=str, help='path to TransE data')
+    cmd_opt.add_argument('-batchsize', default=32, type=int, help='batch size for training')
+
+    cmd_opt.add_argument('-trans', default=0, type=int, help='GCN transductive or inductive')
+    cmd_opt.add_argument('-num_hops', default=3, type=int, help='num of hops in GCN')
+    cmd_opt.add_argument('-num_mlp_layers', default=2, type=int, help='num of MLP layers in GCN')
+    cmd_opt.add_argument('-num_epochs', default=100, type=int, help='num epochs')
+    cmd_opt.add_argument('-num_batches', default=100, type=int, help='num batches per epoch')
+
+    cmd_opt.add_argument('-learning_rate', default=0.0005, type=float, help='learning rate')
+    cmd_opt.add_argument('-lr_decay_factor', default=0.5, type=float, help='learning rate decay factor')
+    cmd_opt.add_argument('-lr_decay_patience', default=10, type=float, help='learning rate decay patience')
+    cmd_opt.add_argument('-lr_decay_min', default=0.00001, type=float, help='learning rate decay min')
+    cmd_opt.add_argument('-patience', default=10, type=int, help='patience for early stopping')
+    cmd_opt.add_argument('-l2_coef', default=0.0, type=float, help='L2 coefficient for weight decay')
+    cmd_opt.add_argument('-observed_prob', default=0.9, type=float, help='prob for sampling observed fact')
+    cmd_opt.add_argument('-entropy_temp', default=1, type=float, help='temperature for entropy term')
+    cmd_opt.add_argument('-no_entropy', default=0, type=int, help='no entropy term in ELBO')
+
+    cmd_opt.add_argument('-rule_weights_learning', default=1, type=int, help='set 1 to learn rule weights')
+    cmd_opt.add_argument('-learning_rate_rule_weights', default=0.001, type=float, help='learning rate of rule weights')
+    cmd_opt.add_argument('-epoch_mode', default=0, type=int, help='set 1 to run in epoch mode')
+    cmd_opt.add_argument('-shuffle_sampling', default=1, type=int, help='set 1 to shuffle formula when sampling')
+    cmd_opt.add_argument('-seed', default=10, type=int, help='random seed')
+
+    cmd_opt.add_argument('-load_method', default=1, type=int, help='set 1 to load FBWN dataset')
+    cmd_opt.add_argument('-use_gcn', default=1, type=int, help='set 1 to use gcn')
+    cmd_opt.add_argument('-filter_latent', default=0, type=int, help='set 1 to filter full latent formula')
+    cmd_opt.add_argument('-closed_world', default=0, type=int, help='set 1 to consider facts not in fact_dict '
+                                                                    'as observed neg facts')
+
+    cmd_opt.add_argument('-device', default='cpu', type=str, help='run on cpu or cuda')
+
+    cmd_args, _ = cmd_opt.parse_known_args()
+
+    cmd_args.exp_path = joinpath(cmd_args.exp_folder, cmd_args.exp_name, get_time_stamp())
+
+******************************************************************************************************************************************
+
+Remember the code:
+
+./common/constants.py
+    from copy import deepcopy
+
+    # dictionary of all constant types with the form of {'Person':0, 'Course':1, ...}
+    TYPE_SET = set()
+
+
+    class ConstantDict:
+        
+        def __init__(self):
+            self.constants = {}
+            
+        def add_const(self, const_type, const):
+            """
+            
+            :param const_type:
+                string 
+            :param const:
+                string          
+            """
+            
+            # if const_type not in TYPE_DICT:
+            #     TYPE_DICT[const_type] = len(TYPE_DICT)
+            
+            if const_type in self.constants:
+                self.constants[const_type].add(const)
+            else:
+                self.constants[const_type] = {const}
+
+        def __getitem__(self, key):
+            return self.constants[key]
+
+        def has_const(self, key, const):
+            if key in self.constants:
+                return const in self[key]
+            else:
+                return False
+
+
+    class Fact:
+        def __init__(self, pred_name, const_ls, val):
+            self.pred_name = pred_name
+            self.const_ls = deepcopy(const_ls)
+            self.val = val
+
+        def __repr__(self):
+            return self.pred_name + '(%s)' % ','.join(self.const_ls)
+
+
+    const_dict = ConstantDict()
+
+***********************************************************************************************************************************
+
+Remember the code:
+
+./common/evaluate.py
+    import pickle
+
+    import sys, os
+
+    sys.path.append('%s/../' % os.path.dirname(os.path.realpath(__file__)))
+
+    from collections import defaultdict
+    from common.cmd_args import cmd_args
+    from os.path import join as joinpath
+    from data_process.dataset import Dataset
+    from common.utils import iterline
+
+
+    def get_hits_mrr(convert_ind=False):
+        truth_path = joinpath(cmd_args.data_root, 'truths.pckl')
+        rank_path = joinpath(cmd_args.data_root, 'rank_list.txt')
+
+        top_k = 10
+        raw = True
+
+        if not raw:
+            truths = pickle.load(open(truth_path, 'rb'))
+            tail_query, head_query = truths['query_head'], truths['query_tail']  # this is correct
+
+        hits = 0
+        hits_by_q = defaultdict(list)
+        ranks = 0
+        ranks_by_q = defaultdict(list)
+        rranks = 0.
+
+        if convert_ind:
+            dataset = Dataset(cmd_args.data_root, 1, 1, load_method=1)
+            ind2const = dict([(i, const) for i, const in enumerate(dataset.const_sort_dict['type'])])
+
+        line_cnt = 0
+
+        for line in iterline(rank_path):
+
+            l = line.split(',')
+            if convert_ind:
+                l = [l[0]] + [ind2const[int(e)] for e in l[1:]]
+
+            assert (len(l) > 3)
+            q, h, t = l[0:3]
+            this_preds = l[3:]
+            assert (h == this_preds[-1])
+            hitted = 0.
+
+            if not raw:
+                if q.startswith('inv_'):
+                    q_ = q[len('inv_'):]
+                    also_correct = tail_query[(q_, t)]
+                else:
+                    also_correct = head_query[(q, t)]
+                also_correct = set(also_correct)
+                assert (h in also_correct)
+                this_preds_filtered = set(this_preds[:-1]) - also_correct
+                this_preds_filtered.add(this_preds[-1])
+                if len(this_preds_filtered) <= top_k:
+                    hitted = 1.
+                rank = len(this_preds_filtered)
+            else:
+                if len(this_preds) <= top_k:
+                    hitted = 1.
+                rank = len(this_preds)
+
+            hits += hitted
+            ranks += rank
+            rranks += 1. / rank
+            hits_by_q[q].append(hitted)
+            ranks_by_q[q].append(rank)
+            line_cnt += 1
+
+        with open(joinpath(cmd_args.data_root, 'evaluation.txt'), 'w') as f:
+            f.write('Hits at %d is %0.4f\n' % (top_k, hits / line_cnt))
+            f.write('Mean rank %0.2f\n' % (1. * ranks / line_cnt))
+            f.write('Mean Reciprocal Rank %0.4f\n' % (1. * rranks / line_cnt))
+
+
+    def gen_eval_query(dataset, const2ind=None, pickone=None):
+        const_ls = dataset.const_sort_dict['type']
+
+        toindex = lambda x: x
+        if const2ind is not None:
+            toindex = lambda x: const2ind[x]
+
+        for val, pred_name, consts in dataset.test_fact_ls:
+            c1, c2 = toindex(consts[0]), toindex(consts[1])
+
+            if pickone is not None:
+                if pred_name != pickone:
+                    continue
+
+            X, invX = [], []
+            for const in const_ls:
+
+                if const not in dataset.ht_dict[pred_name][0][consts[0]]:
+                    X.append([c1, toindex(const)])
+                if const not in dataset.ht_dict[pred_name][1][consts[1]]:
+                    invX.append([toindex(const), c2])
+
+            yield pred_name, X, invX, [[c1, c2]]
+
+
+    if __name__ == '__main__':
+        get_hits_mrr()
+
+*********************************************************************************************************************************************
+
+Remember the code:
+
+./common/formula.py
+    class Atom:
+        def __init__(self, neg, pred_name, var_name_ls, var_type_ls):
+            self.neg = neg
+            self.pred_name = pred_name
+            self.var_name_ls = var_name_ls
+            self.var_type_ls = var_type_ls
+
+        def __repr__(self):
+            return ('!' if self.neg else '') + self.pred_name + '(%s)' % ','.join(self.var_name_ls)
+
+
+    class Formula:
+        """
+            only support clause form with disjunction, e.g. !
+        """
+
+        def __init__(self, atom_ls, weight):
+            self.weight = weight
+            self.atom_ls = atom_ls
+            self.rule_vars = dict()
+
+            for atom in self.atom_ls:
+                self.rule_vars.update(zip(atom.var_name_ls, atom.var_type_ls))
+            self.key2ind = dict(zip(self.rule_vars.keys(), range(len(self.rule_vars.keys()))))
+
+        def evaluate(self):
+            pass
+
+        def __repr__(self):
+            return ' v '.join(list(map(repr, self.atom_ls)))
+
+*****************************************************************************************************************************************
+
+Remember the code:
+
+./common/predicate.py
+    PRED_DICT = {}
+
+    class Predicate:
+        def __init__(self, name, var_types):
+            """
+
+            :param name:
+                string
+            :param var_types:
+                list of strings
+            """
+            self.name = name
+            self.var_types = var_types
+            self.num_args = len(var_types)
+
+        def __repr__(self):
+            return '%s(%s)' % (self.name, ','.join(self.var_types))
+
+********************************************************************************************************************************************
+
+Remember the code:
+
+./common/utils.py
+    import time
+    import datetime
+
+
+    class EarlyStopMonitor:
+
+    def __init__(self, patience):
+        self.patience = patience
+        self.cnt = 0
+        self.cur_best = float('inf')
+
+    def update(self, loss):
+        """
+
+        :param loss:
+        :return:
+            return True if patience exceeded
+        """
+        if loss < self.cur_best:
+        self.cnt = 0
+        self.cur_best = loss
+        else:
+        self.cnt += 1
+
+        if self.cnt >= self.patience:
+        return True
+        else:
+        return False
+
+    def reset(self):
+        self.cnt = 0
+        self.cur_best = float('inf')
+
+
+    def iterline(fpath):
+    with open(fpath) as f:
+
+        for line in f:
+
+        line = line.strip()
+        if line == '':
+            continue
+
+        yield line
+
+
+    def get_time_stamp():
+    return datetime.datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
+
+
+    def get_lr(optimizer):
+    return optimizer.state_dict()['param_groups'][0]['lr']
+
+
+    def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+*************************************************************************************************************************************************
+
+Remember the code:
+
+./data_process/dataset.py
+    from data_process.preprocess import preprocess_kinship, preprocess_large
+    from os.path import join as joinpath
+    from common.constants import const_dict
+    from common.predicate import PRED_DICT
+    import itertools
+    import random
+    from random import shuffle, choice
+    from collections import Counter
+    import numpy as np
+
+    # grounded rule stats code
+    BAD = 0  # sample not valid
+    FULL_OBSERVERED = 1  # sample valid, but rule contains only observed vars and does not have negation for all atoms
+    GOOD = 2  # sample valid
+
+
+    class Dataset:
+        def __init__(self, data_root, batchsize, shuffle_sampling=False, ext_rule_path=None, load_method=0):
+
+            guss_fb = 'fb15k' in data_root
+            if guss_fb != (load_method == 1):
+                print("WARNING: set load_method to 1 if you load Freebase dataset, otherwise 0")
+
+
+            if load_method == 1:
+                fact_ls, rule_ls, valid_ls, query_ls = preprocess_large(data_root)
+            else:
+                rpath = joinpath(data_root, 'rules') if ext_rule_path is None else ext_rule_path
+                fact_ls, rule_ls, query_ls = preprocess_kinship(joinpath(data_root, 'predicates'),
+                                                                joinpath(data_root, 'facts'),
+                                                                rpath,
+                                                                joinpath(data_root, 'queries'))
+                valid_ls = []
+
+            self.const_sort_dict = dict(
+                [(type_name, sorted(list(const_dict[type_name]))) for type_name in const_dict.constants.keys()])
+
+            if load_method == 1:
+                self.const2ind = dict([(const, i) for i, const in enumerate(self.const_sort_dict['type'])])
+
+            # linear in size of facts
+            self.fact_dict = dict((pred_name, set()) for pred_name in PRED_DICT)
+            self.test_fact_dict = dict((pred_name, set()) for pred_name in PRED_DICT)
+            self.valid_dict = dict((pred_name, set()) for pred_name in PRED_DICT)
+
+            self.ht_dict = dict((pred_name, [dict(), dict()]) for pred_name in PRED_DICT)
+            self.ht_dict_train = dict((pred_name, [dict(), dict()]) for pred_name in PRED_DICT)
+
+            def add_ht(pn, c_ls, ht_dict):
+                if load_method == 0:
+                    if c_ls[0] in ht_dict[pn][0]:
+                        ht_dict[pn][0][c_ls[0]].add(c_ls[0])
+                    else:
+                        ht_dict[pn][0][c_ls[0]] = set([c_ls[0]])
+                elif load_method == 1:
+                    if c_ls[0] in ht_dict[pn][0]:
+                        ht_dict[pn][0][c_ls[0]].add(c_ls[1])
+                    else:
+                        ht_dict[pn][0][c_ls[0]] = set([c_ls[1]])
+
+                    if c_ls[1] in ht_dict[pn][1]:
+                        ht_dict[pn][1][c_ls[1]].add(c_ls[0])
+                    else:
+                        ht_dict[pn][1][c_ls[1]] = set([c_ls[0]])
+
+            const_cnter = Counter()
+            for fact in fact_ls:
+                self.fact_dict[fact.pred_name].add((fact.val, tuple(fact.const_ls)))
+                add_ht(fact.pred_name, fact.const_ls, self.ht_dict)
+                add_ht(fact.pred_name, fact.const_ls, self.ht_dict_train)
+                const_cnter.update(fact.const_ls)
+
+            for fact in valid_ls:
+                self.valid_dict[fact.pred_name].add((fact.val, tuple(fact.const_ls)))
+                add_ht(fact.pred_name, fact.const_ls, self.ht_dict)
+
+            # the sorted list version
+            self.fact_dict_2 = dict((pred_name, sorted(list(self.fact_dict[pred_name])))
+                                    for pred_name in self.fact_dict.keys())
+            self.valid_dict_2 = dict((pred_name, sorted(list(self.valid_dict[pred_name])))
+                                    for pred_name in self.valid_dict.keys())
+
+            self.rule_ls = rule_ls
+
+            # pred_atom-key dict
+            self.atom_key_dict_ls = []
+            for rule in self.rule_ls:
+                atom_key_dict = dict()
+
+                for atom in rule.atom_ls:
+                    atom_dict = dict((var_name, dict()) for var_name in atom.var_name_ls)
+
+                    for i, var_name in enumerate(atom.var_name_ls):
+
+                        if atom.pred_name not in self.fact_dict:
+                            continue
+
+                        for v in self.fact_dict[atom.pred_name]:
+                            if v[1][i] not in atom_dict[var_name]:
+                                atom_dict[var_name][v[1][i]] = [v]
+                            else:
+                                atom_dict[var_name][v[1][i]] += [v]
+
+                    # happens if predicate occurs more than once in one rule then we merge the set
+                    if atom.pred_name in atom_key_dict:
+                        for k, v in atom_dict.items():
+                            if k not in atom_key_dict[atom.pred_name]:
+                                atom_key_dict[atom.pred_name][k] = v
+                    else:
+                        atom_key_dict[atom.pred_name] = atom_dict
+
+                self.atom_key_dict_ls.append(atom_key_dict)
+
+            self.test_fact_ls = []
+            self.valid_fact_ls = []
+
+            for fact in query_ls:
+                self.test_fact_ls.append((fact.val, fact.pred_name, tuple(fact.const_ls)))
+                self.test_fact_dict[fact.pred_name].add((fact.val, tuple(fact.const_ls)))
+                add_ht(fact.pred_name, fact.const_ls, self.ht_dict)
+
+            for fact in valid_ls:
+                self.valid_fact_ls.append((fact.val, fact.pred_name, tuple(fact.const_ls)))
+
+            self.shuffle_sampling = shuffle_sampling
+            self.batchsize = batchsize
+            self.num_rules = len(rule_ls)
+
+            self.rule_gens = None
+            self.reset()
+
+        def generate_gnd_pred(self, pred_name):
+            """
+                return a list of all instantiations of a predicate function, this can be extremely large
+            :param pred_name:
+                string
+            :return:
+            """
+
+            assert pred_name in PRED_DICT
+
+            pred = PRED_DICT[pred_name]
+            subs = itertools.product(*[self.const_sort_dict[var_type] for var_type in pred.var_types])
+
+            return [(pred_name, sub) for sub in subs]
+
+        def generate_gnd_rule(self, rule):
+
+            subs = itertools.product(*[self.const_sort_dict[rule.rule_vars[k]] for k in rule.rule_vars.keys()])
+            sub = next(subs, None)
+
+            while sub is not None:
+
+                latent_vars = []
+                latent_neg_mask = []
+                observed_neg_mask = []
+
+                for atom in rule.atom_ls:
+                    grounding = tuple(sub[rule.key2ind[var_name]] for var_name in atom.var_name_ls)
+                    pos_gnding, neg_gnding = (1, grounding), (0, grounding)
+
+                    if pos_gnding in self.fact_dict[atom.pred_name]:
+                        observed_neg_mask.append(0 if atom.neg else 1)
+                    elif neg_gnding in self.fact_dict[atom.pred_name]:
+                        observed_neg_mask.append(1 if atom.neg else 0)
+                    else:
+                        latent_vars.append((atom.pred_name, grounding))
+                        latent_neg_mask.append(1 if atom.neg else 0)
+
+                isfullneg = (sum(latent_neg_mask) == len(latent_neg_mask)) and \
+                            (sum(observed_neg_mask) > 0)
+
+                yield latent_vars, [latent_neg_mask, observed_neg_mask], isfullneg
+
+                sub = next(subs, None)
+
+        def get_batch(self, epoch_mode=False, filter_latent=True):
+            """
+                return the ind-th batch of ground formula and latent variable indicators
+            :param ind:
+                index of the batch
+            :return:
+            """
+
+            batch_neg_mask = [[] for _ in range(len(self.rule_ls))]
+            batch_latent_var_inds = [[] for _ in range(len(self.rule_ls))]
+            observed_rule_cnts = [0.0 for _ in range(len(self.rule_ls))]
+            flat_latent_vars = dict()
+
+            cnt = 0
+
+            inds = list(range(len(self.rule_ls)))
+
+            while cnt < self.batchsize:
+
+                if self.shuffle_sampling:
+                    shuffle(inds)
+
+                hasdata = False
+                for ind in inds:
+                    latent_vars, neg_mask, isfullneg = next(self.rule_gens[ind], (None, None, None))
+
+                    if latent_vars is None:
+                        if epoch_mode:
+                            continue
+                        else:
+                            self.rule_gens[ind] = self.generate_gnd_rule(self.rule_ls[ind])
+                            latent_vars, neg_mask, isfullneg = next(self.rule_gens[ind])
+
+                    if epoch_mode:
+                        hasdata = True
+
+                    # if rule is fully latent
+                    if (len(neg_mask[1]) == 0) and filter_latent:
+                        continue
+
+                    # if rule fully observed
+                    if len(latent_vars) == 0:
+                        observed_rule_cnts[ind] += 0 if isfullneg else 1
+                        cnt += 1
+                        if cnt >= self.batchsize:
+                            break
+                        else:
+                            continue
+
+                    batch_neg_mask[ind].append(neg_mask)
+
+                    for latent_var in latent_vars:
+                        if latent_var not in flat_latent_vars:
+                            flat_latent_vars[latent_var] = len(flat_latent_vars)
+
+                    batch_latent_var_inds[ind].append([flat_latent_vars[e] for e in latent_vars])
+
+                    cnt += 1
+
+                    if cnt >= self.batchsize:
+                        break
+
+                if epoch_mode and (hasdata is False):
+                    break
+
+            flat_list = sorted([(k, v) for k, v in flat_latent_vars.items()], key=lambda x: x[1])
+            flat_list = [e[0] for e in flat_list]
+
+            return batch_neg_mask, flat_list, batch_latent_var_inds, observed_rule_cnts
+
+        def _instantiate_pred(self, atom, atom_dict, sub, rule, observed_prob):
+
+            key2ind = rule.key2ind
+            rule_vars = rule.rule_vars
+
+            # substitute with observed fact
+            if np.random.rand() < observed_prob:
+
+                fact_choice_set = None
+                for var_name in atom.var_name_ls:
+                    const = sub[key2ind[var_name]]
+                    if const is None:
+                        choice_set = itertools.chain.from_iterable([v for k, v in atom_dict[var_name].items()])
+                    else:
+                        if const in atom_dict[var_name]:
+                            choice_set = atom_dict[var_name][const]
+                        else:
+                            choice_set = []
+
+                    if fact_choice_set is None:
+                        fact_choice_set = set(choice_set)
+                    else:
+                        fact_choice_set = fact_choice_set.intersection(set(choice_set))
+
+                    if len(fact_choice_set) == 0:
+                        break
+
+                if len(fact_choice_set) == 0:
+                    for var_name in atom.var_name_ls:
+                        if sub[key2ind[var_name]] is None:
+                            sub[key2ind[var_name]] = choice(self.const_sort_dict[rule_vars[var_name]])
+                else:
+                    val, const_ls = choice(sorted(list(fact_choice_set)))
+                    for var_name, const in zip(atom.var_name_ls, const_ls):
+                        sub[key2ind[var_name]] = const
+
+            # substitute with random facts
+            else:
+                for var_name in atom.var_name_ls:
+                    if sub[key2ind[var_name]] is None:
+                        sub[key2ind[var_name]] = choice(self.const_sort_dict[rule_vars[var_name]])
+
+        def _gen_mask(self, rule, sub, closed_world):
+
+            latent_vars = []
+            observed_vars = []
+            latent_neg_mask = []
+            observed_neg_mask = []
+
+            for atom in rule.atom_ls:
+                grounding = tuple(sub[rule.key2ind[var_name]] for var_name in atom.var_name_ls)
+                pos_gnding, neg_gnding = (1, grounding), (0, grounding)
+
+                if pos_gnding in self.fact_dict[atom.pred_name]:
+                    observed_vars.append((1, atom.pred_name))
+                    observed_neg_mask.append(0 if atom.neg else 1)
+                elif neg_gnding in self.fact_dict[atom.pred_name]:
+                    observed_vars.append((0, atom.pred_name))
+                    observed_neg_mask.append(1 if atom.neg else 0)
+                else:
+                    if closed_world and (len(self.test_fact_dict[atom.pred_name]) == 0):
+                        observed_vars.append((0, atom.pred_name))
+                        observed_neg_mask.append(1 if atom.neg else 0)
+                    else:
+                        latent_vars.append((atom.pred_name, grounding))
+                        latent_neg_mask.append(1 if atom.neg else 0)
+
+            return latent_vars, observed_vars, latent_neg_mask, observed_neg_mask
+
+        def _get_rule_stat(self, observed_vars, latent_vars, observed_neg_mask, filter_latent, filter_observed):
+
+            is_full_latent = len(observed_vars) == 0
+            is_full_observed = len(latent_vars) == 0
+
+            if is_full_latent and filter_latent:
+                return BAD
+
+            if is_full_observed:
+
+                if filter_observed:
+                    return BAD
+
+                is_full_neg = sum(observed_neg_mask) == 0
+
+                if is_full_neg:
+                    return BAD
+
+                else:
+                    return FULL_OBSERVERED
+
+            # if observed var already yields 1
+            if sum(observed_neg_mask) > 0:
+                return BAD
+
+            return GOOD
+
+        # TODO only binary | only positive fact!!
+        def _inst_var(self, sub, var2ind, var2type, at, ht_dict, gen_latent):
+
+            if len(at.var_name_ls) != 2:
+                raise KeyError
+
+            must_latent = gen_latent
+
+            if must_latent:
+
+                tmp = [sub[var2ind[vn]] for vn in at.var_name_ls]
+
+                for i, subi in enumerate(tmp):
+                    if subi is None:
+                        tmp[i] = random.choice(self.const_sort_dict[var2type[at.var_name_ls[i]]])
+
+                islatent = (tmp[0] not in ht_dict[0]) or (tmp[1] not in ht_dict[0][tmp[0]])
+                for i, vn in enumerate(at.var_name_ls):
+                    sub[var2ind[vn]] = tmp[i]
+                return [self.const2ind[subi] for subi in tmp], islatent, islatent or at.neg
+
+            vn0 = at.var_name_ls[0]
+            sub0 = sub[var2ind[vn0]]
+            vn1 = at.var_name_ls[1]
+            sub1 = sub[var2ind[vn1]]
+
+            if sub0 is None:
+
+                if sub1 is None:
+                    if len(ht_dict[0]) > 0:
+                        sub0 = random.choice(tuple(ht_dict[0].keys()))
+                        sub1 = random.choice(tuple(ht_dict[0][sub0]))
+                        sub[var2ind[vn0]] = sub0
+                        sub[var2ind[vn1]] = sub1
+                        return [self.const2ind[sub0], self.const2ind[sub1]], False, at.neg
+
+                else:
+                    if sub1 in ht_dict[1]:
+                        sub0 = random.choice(tuple(ht_dict[1][sub1]))
+                        sub[var2ind[vn0]] = sub0
+                        return [self.const2ind[sub0], self.const2ind[sub1]], False, at.neg
+                    else:
+                        sub0 = random.choice(self.const_sort_dict[var2type[vn0]])
+                        sub[var2ind[vn0]] = sub0
+                        return [self.const2ind[sub0], self.const2ind[sub1]], True, True
+
+            else:
+
+                if sub1 is None:
+                    if sub0 in ht_dict[0]:
+                        sub1 = random.choice(tuple(ht_dict[0][sub0]))
+                        sub[var2ind[vn1]] = sub1
+                        return [self.const2ind[sub0], self.const2ind[sub1]], False, at.neg
+                    else:
+                        sub1 = random.choice(self.const_sort_dict[var2type[vn1]])
+                        sub[var2ind[vn1]] = sub1
+                        return [self.const2ind[sub0], self.const2ind[sub1]], True, True
+
+                else:
+                    islatent = (sub0 not in ht_dict[0]) or (sub1 not in ht_dict[0][sub0])
+                    return [self.const2ind[sub0], self.const2ind[sub1]], islatent, islatent or at.neg
+
+***********************************************
+
+continuation of class Dataset:
+    # TODO use it only for binary rel and positive fact only
+    def get_batch_fast(self, batchsize, observed_prob=0.9):
+
+        prob_decay = 0.5
+
+        for rule in self.rule_ls:
+
+            var2ind = rule.key2ind
+            var2type = rule.rule_vars
+            samples = [[atom.pred_name, []] for atom in rule.atom_ls]
+            neg_mask = [[atom.pred_name, []] for atom in rule.atom_ls]
+            latent_mask = [[atom.pred_name, []] for atom in rule.atom_ls]
+            obs_var = [[atom.pred_name, []] for atom in rule.atom_ls]
+
+            cnt = 0
+            while cnt <= batchsize:
+
+                sub = [None] * len(rule.rule_vars)  # substitutions
+
+                sample_buff = [[] for _ in rule.atom_ls]
+                neg_mask_buff = [[] for _ in rule.atom_ls]
+                latent_mask_buff = [[] for _ in rule.atom_ls]
+
+                atom_inds = list(range(len(rule.atom_ls)))
+                shuffle(atom_inds)
+                succ = True
+                cur_threshold = observed_prob
+                obs_list = []
+
+                for atom_ind in atom_inds:
+                    atom = rule.atom_ls[atom_ind]
+                    pred_ht_dict = self.ht_dict_train[atom.pred_name]
+
+                    gen_latent = np.random.rand() > cur_threshold
+                    c_ls, islatent, atom_succ = self._inst_var(sub, var2ind, var2type,
+                                                            atom, pred_ht_dict, gen_latent)
+
+                    if not islatent:
+                        obs_var[atom_ind][1].append(c_ls)
+
+                    cur_threshold *= prob_decay
+                    succ = succ and atom_succ
+                    obs_list.append(not islatent)
+
+                    if succ:
+                        sample_buff[atom_ind].append(c_ls)
+                        latent_mask_buff[atom_ind].append(1 if islatent else 0)
+                        neg_mask_buff[atom_ind].append(0 if atom.neg else 1)
+
+                if succ and any(obs_list):
+                    for i in range(len(rule.atom_ls)):
+                        samples[i][1].extend(sample_buff[i])
+                        latent_mask[i][1].extend(latent_mask_buff[i])
+                        neg_mask[i][1].extend(neg_mask_buff[i])
+
+                cnt += 1
+
+            yield samples, neg_mask, latent_mask, obs_var
+
+    def get_batch_by_q(self, batchsize, observed_prob=1.0, validation=False):
+
+        samples_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        neg_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        latent_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        obs_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        neg_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        cnt = 0
+
+        num_ents = len(self.const2ind)
+        ind2const = self.const_sort_dict['type']
+
+        def gen_fake(c1, c2, pn):
+            for _ in range(10):
+                c1_fake = random.randint(0, num_ents - 1)
+                c2_fake = random.randint(0, num_ents - 1)
+                if np.random.rand() > 0.5:
+                    if ind2const[c1_fake] not in self.ht_dict_train[pn][1][ind2const[c2]]:
+                        return c1_fake, c2
+                else:
+                    if ind2const[c2_fake] not in self.ht_dict_train[pn][0][ind2const[c1]]:
+                        return c1, c2_fake
+            return None, None
+
+        if validation:
+            fact_ls = self.valid_fact_ls
+        else:
+            fact_ls = self.test_fact_ls
+
+        for val, pred_name, consts in fact_ls:
+
+            for rule_i, rule in enumerate(self.rule_ls):
+
+                # find rule with pred_name as head
+                if rule.atom_ls[-1].pred_name != pred_name:
+                    continue
+
+                samples = samples_by_r[rule_i]
+                neg_mask = neg_mask_by_r[rule_i]
+                latent_mask = latent_mask_by_r[rule_i]
+                obs_var = obs_var_by_r[rule_i]
+                neg_var = neg_var_by_r[rule_i]
+
+                var2ind = rule.key2ind
+                var2type = rule.rule_vars
+
+                sub = [None] * len(rule.rule_vars)  # substitutions
+                vn0, vn1 = rule.atom_ls[-1].var_name_ls
+                sub[var2ind[vn0]] = consts[0]
+                sub[var2ind[vn1]] = consts[1]
+
+                sample_buff = [[] for _ in rule.atom_ls]
+                neg_mask_buff = [[] for _ in rule.atom_ls]
+                latent_mask_buff = [[] for _ in rule.atom_ls]
+
+                atom_inds = list(range(len(rule.atom_ls) - 1))
+                shuffle(atom_inds)
+                succ = True
+                obs_list = []
+
+                for atom_ind in atom_inds:
+                    atom = rule.atom_ls[atom_ind]
+                    pred_ht_dict = self.ht_dict_train[atom.pred_name]
+
+                    gen_latent = np.random.rand() > observed_prob
+                    c_ls, islatent, atom_succ = self._inst_var(sub, var2ind, var2type,
+                                                            atom, pred_ht_dict, gen_latent)
+
+                    assert atom_succ
+
+                    if not islatent:
+                        obs_var[atom_ind][1].append(c_ls)
+                        c1, c2 = gen_fake(c_ls[0], c_ls[1], atom.pred_name)
+                        if c1 is not None:
+                            neg_var[atom_ind][1].append([c1, c2])
+
+                    succ = succ and atom_succ
+                    obs_list.append(not islatent)
+
+                    sample_buff[atom_ind].append(c_ls)
+                    latent_mask_buff[atom_ind].append(1 if islatent else 0)
+                    neg_mask_buff[atom_ind].append(0 if atom.neg else 1)
+
+                if succ and any(obs_list):
+                    for i in range(len(rule.atom_ls)):
+                        samples[i][1].extend(sample_buff[i])
+                        latent_mask[i][1].extend(latent_mask_buff[i])
+                        neg_mask[i][1].extend(neg_mask_buff[i])
+
+                    samples[-1][1].append([self.const2ind[consts[0]], self.const2ind[consts[1]]])
+                    latent_mask[-1][1].append(1)
+                    neg_mask[-1][1].append(1)
+
+                    cnt += 1
+
+            if cnt >= batchsize:
+                yield samples_by_r, latent_mask_by_r, neg_mask_by_r, obs_var_by_r, neg_var_by_r
+
+                samples_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                neg_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                latent_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                obs_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                neg_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                cnt = 0
+
+        yield samples_by_r, latent_mask_by_r, neg_mask_by_r, obs_var_by_r, neg_var_by_r
+
+    def get_batch_by_q_v2(self, batchsize, observed_prob=1.0):
+
+        samples_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        neg_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        latent_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        obs_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        neg_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+        cnt = 0
+
+        num_ents = len(self.const2ind)
+        ind2const = self.const_sort_dict['type']
+
+        def gen_fake(c1, c2, pn):
+            for _ in range(10):
+                c1_fake = random.randint(0, num_ents - 1)
+                c2_fake = random.randint(0, num_ents - 1)
+                if np.random.rand() > 0.5:
+                    if ind2const[c1_fake] not in self.ht_dict_train[pn][1][ind2const[c2]]:
+                        return c1_fake, c2
+                else:
+                    if ind2const[c2_fake] not in self.ht_dict_train[pn][0][ind2const[c1]]:
+                        return c1, c2_fake
+            return None, None
+
+        for val, pred_name, consts in self.test_fact_ls:
+
+            for rule_i, rule in enumerate(self.rule_ls):
+
+                # find rule with pred_name as head
+                if rule.atom_ls[-1].pred_name != pred_name:
+                    continue
+
+                samples = samples_by_r[rule_i]
+                neg_mask = neg_mask_by_r[rule_i]
+                latent_mask = latent_mask_by_r[rule_i]
+
+                var2ind = rule.key2ind
+                var2type = rule.rule_vars
+
+                sub_ls = [[None for _ in range(len(rule.rule_vars))] for _ in range(2)]  # substitutions
+
+                vn0, vn1 = rule.atom_ls[-1].var_name_ls
+                sub_ls[0][var2ind[vn0]] = consts[0]
+                sub_ls[0][var2ind[vn1]] = consts[1]
+
+                c1, c2 = gen_fake(self.const2ind[consts[0]], self.const2ind[consts[1]], pred_name)
+                if c1 is not None:
+                    sub_ls[1][var2ind[vn0]] = ind2const[c1]
+                    sub_ls[1][var2ind[vn1]] = ind2const[c2]
+                else:
+                    sub_ls.pop(1)
+
+                pos_query_succ = False
+
+                for sub_ind, sub in enumerate(sub_ls):
+
+                    sample_buff = [[] for _ in rule.atom_ls]
+                    neg_mask_buff = [[] for _ in rule.atom_ls]
+                    latent_mask_buff = [[] for _ in rule.atom_ls]
+
+                    atom_inds = list(range(len(rule.atom_ls)-1))
+                    shuffle(atom_inds)
+                    succ = True
+                    obs_list = []
+
+                    for atom_ind in atom_inds:
+                        atom = rule.atom_ls[atom_ind]
+                        pred_ht_dict = self.ht_dict_train[atom.pred_name]
+
+                        gen_latent = np.random.rand() > observed_prob
+                        if sub_ind == 1:
+                            gen_latent = np.random.rand() > 0.5
+                        c_ls, islatent, atom_succ = self._inst_var(sub, var2ind, var2type,
+                                                                atom, pred_ht_dict, gen_latent)
+
+                        assert atom_succ
+
+                        succ = succ and atom_succ
+                        obs_list.append(not islatent)
+
+                        sample_buff[atom_ind].append(c_ls)
+                        latent_mask_buff[atom_ind].append(1 if islatent else 0)
+                        neg_mask_buff[atom_ind].append(0 if atom.neg else 1)
+
+                    if succ:
+                        if any(obs_list) or ((sub_ind == 1) and pos_query_succ):
+
+                            for i in range(len(rule.atom_ls)):
+                                samples[i][1].extend(sample_buff[i])
+                                latent_mask[i][1].extend(latent_mask_buff[i])
+                                neg_mask[i][1].extend(neg_mask_buff[i])
+
+                            if sub_ind == 0:
+                                samples[-1][1].append([self.const2ind[consts[0]], self.const2ind[consts[1]]])
+                                latent_mask[-1][1].append(1)
+                                neg_mask[-1][1].append(1)
+                                pos_query_succ = True
+                                cnt += 1
+                            else:
+                                samples[-1][1].append([c1, c2])
+                                latent_mask[-1][1].append(0) # sample a negative fact at head
+                                neg_mask[-1][1].append(1)
+
+            if cnt >= batchsize:
+
+                yield samples_by_r, latent_mask_by_r, neg_mask_by_r, obs_var_by_r, neg_var_by_r
+
+                samples_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                neg_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                latent_mask_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                obs_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                neg_var_by_r = [[[atom.pred_name, []] for atom in rule.atom_ls] for rule in self.rule_ls]
+                cnt = 0
+
+        yield samples_by_r, latent_mask_by_r, neg_mask_by_r, obs_var_by_r, neg_var_by_r
+
+    def get_batch_rnd(self, observed_prob=0.7, filter_latent=True, closed_world=False, filter_observed=False):
+        """
+            return a batch of gnd formulae by random sampling with controllable bias towards those containing
+            observed variables. The overall sampling logic is that:
+                1) rnd sample a rule from rule_ls
+                2) shuffle the predicates contained in the rule
+                3) for each of these predicates, with (observed_prob) it will be instantiated as observed variable, and
+                for (1-observed_prob) if will be simply uniformly instantiated.
+                3.1) if observed var, then sample from the knowledge base, which is self.fact_dict, if failed for any
+                    reason, go to 3.2)
+                3.2) if uniformly sample, then for each logic variable in the predicate, instantiate it with a uniform
+                    sample from the corresponding constant dict
+
+        :param observed_prob:
+            probability of instantiating a predicate as observed variable
+        :param filter_latent:
+            filter out ground formula containing only latent vars
+        :param closed_world:
+            if set True, reduce the sampling space of all predicates not in the test_dict to the set specified in
+            fact_dict
+        :param filter_observed:
+            filter out ground formula containing only observed vars
+        :return:
+
+        """
+
+        batch_neg_mask = [[] for _ in range(len(self.rule_ls))]
+        batch_latent_var_inds = [[] for _ in range(len(self.rule_ls))]
+        batch_observed_vars = [[] for _ in range(len(self.rule_ls))]
+        observed_rule_cnts = [0.0 for _ in range(len(self.rule_ls))]
+        flat_latent_vars = dict()
+
+        cnt = 0
+
+        inds = list(range(len(self.rule_ls)))
+
+        while cnt < self.batchsize:
+
+            # randomly sample a formula
+            if self.shuffle_sampling:
+                shuffle(inds)
+
+            for ind in inds:
+
+                rule = self.rule_ls[ind]
+                atom_key_dict = self.atom_key_dict_ls[ind]
+                sub = [None] * len(rule.rule_vars)  # substitutions
+
+                # randomly sample an atom from the formula
+                atom_inds = list(range(len(rule.atom_ls)))
+                shuffle(atom_inds)
+                for atom_ind in atom_inds:
+                    atom = rule.atom_ls[atom_ind]
+                    atom_dict = atom_key_dict[atom.pred_name]
+
+                    # instantiate the predicate
+                    self._instantiate_pred(atom, atom_dict, sub, rule, observed_prob)
+
+                    # if variable substitution is complete already then exit
+                    if not (None in sub):
+                        break
+
+                # generate latent and observed var labels and their negation masks
+                latent_vars, observed_vars, \
+                latent_neg_mask, observed_neg_mask = self._gen_mask(rule, sub, closed_world)
+
+                # check sampled ground rule status
+                stat_code = self._get_rule_stat(observed_vars, latent_vars, observed_neg_mask,
+                                                filter_latent, filter_observed)
+
+                # is a valid sample with only observed vars and does not have negation on all of them
+                if stat_code == FULL_OBSERVERED:
+                    observed_rule_cnts[ind] += 1
+
+                    cnt += 1
+
+                # is a valid sample
+                elif stat_code == GOOD:
+                    batch_neg_mask[ind].append([latent_neg_mask, observed_neg_mask])
+
+                    for latent_var in latent_vars:
+                        if latent_var not in flat_latent_vars:
+                            flat_latent_vars[latent_var] = len(flat_latent_vars)
+
+                    batch_latent_var_inds[ind].append([flat_latent_vars[e] for e in latent_vars])
+                    batch_observed_vars[ind].append(observed_vars)
+
+                    cnt += 1
+
+                # not a valid sample
+                else:
+                    continue
+
+                if cnt >= self.batchsize:
+                    break
+
+        flat_list = sorted([(k, v) for k, v in flat_latent_vars.items()], key=lambda x: x[1])
+        flat_list = [e[0] for e in flat_list]
+
+        return batch_neg_mask, flat_list, batch_latent_var_inds, observed_rule_cnts, batch_observed_vars
+
+    def reset(self):
+        self.rule_gens = [self.generate_gnd_rule(rule) for rule in self.rule_ls]
+
+    def get_stats(self):
+
+        num_ents = sum([len(v) for k, v in self.const_sort_dict.items()])
+        num_rels = len(PRED_DICT)
+        num_facts = sum([len(v) for k, v in self.fact_dict.items()])
+        num_queries = len(self.test_fact_ls)
+
+        num_gnd_atom = 0
+        for pred_name, pred in PRED_DICT.items():
+            cnt = 1
+            for var_type in pred.var_types:
+                cnt *= len(self.const_sort_dict[var_type])
+            num_gnd_atom += cnt
+
+        num_gnd_rule = 0
+        for rule in self.rule_ls:
+            cnt = 1
+            for var_type in rule.rule_vars.values():
+                cnt *= len(self.const_sort_dict[var_type])
+            num_gnd_rule += cnt
+
+        return num_ents, num_rels, num_facts, num_queries, num_gnd_atom, num_gnd_rule
+
+**********************************************************************************************************************************
+
+Remember the code:
+
+./data_process/preprocess.py
+    import re
+    from common.predicate import Predicate, PRED_DICT
+    from common.constants import TYPE_SET, const_dict, Fact
+    from common.formula import Atom, Formula
+    from os.path import join as joinpath
+    from os.path import isfile
+    from common.utils import iterline
+    from common.cmd_args import cmd_args
+
+
+    def preprocess_large(dataroot):
+        """
+            Preprocessing for FB and WN. Assuming:
+
+                * all relations are of artiy of 2
+                * only one constant type
+                * all facts are positive facts
+
+            :param dataroot:
+                data root path
+            :return:
+
+        """
+
+        fact_path_ls = [joinpath(dataroot, 'facts.txt'),
+                        joinpath(dataroot, 'train.txt')]
+        query_path = joinpath(dataroot, 'test.txt')
+        pred_path = joinpath(dataroot, 'relations.txt')
+        const_path = joinpath(dataroot, 'entities.txt')
+        valid_path = joinpath(dataroot, 'valid.txt')
+
+        rule_path = joinpath(dataroot, cmd_args.rule_filename)
+
+        assert all(map(isfile, fact_path_ls+[query_path, pred_path, const_path, valid_path, rule_path]))
+
+        # assuming only one type
+        TYPE_SET.update(['type'])
+
+        # add all const
+        for line in iterline(const_path):
+            const_dict.add_const('type', line)
+
+        # add all pred
+        for line in iterline(pred_path):
+            PRED_DICT[line] = Predicate(line, ['type', 'type'])
+
+        # add all facts
+        fact_ls = []
+        for fact_path in fact_path_ls:
+            for line in iterline(fact_path):
+                parts = line.split('\t')
+
+                assert len(parts) == 3, print(parts)
+
+                e1, pred_name, e2 = parts
+
+                assert const_dict.has_const('type', e1) and const_dict.has_const('type', e2)
+                assert pred_name in PRED_DICT
+
+                fact_ls.append(Fact(pred_name, [e1, e2], 1))
+
+        # add all validations
+        valid_ls = []
+        for line in iterline(valid_path):
+            parts = line.split('\t')
+
+            assert len(parts) == 3, print(parts)
+
+            e1, pred_name, e2 = parts
+
+            assert const_dict.has_const('type', e1) and const_dict.has_const('type', e2)
+            assert pred_name in PRED_DICT
+
+            valid_ls.append(Fact(pred_name, [e1, e2], 1))
+
+        # add all queries
+        query_ls = []
+        for line in iterline(query_path):
+            parts = line.split('\t')
+
+            assert len(parts) == 3, print(parts)
+
+            e1, pred_name, e2 = parts
+
+            assert const_dict.has_const('type', e1) and const_dict.has_const('type', e2)
+            assert pred_name in PRED_DICT
+
+            query_ls.append(Fact(pred_name, [e1, e2], 1))
+
+        # add all rules
+        rule_ls = []
+        strip_items = lambda ls: list(map(lambda x: x.strip(), ls))
+        first_atom_reg = re.compile(r'([\d.]+) (!?)([^(]+)\((.*)\)')
+        atom_reg = re.compile(r'(!?)([^(]+)\((.*)\)')
+        for line in iterline(rule_path):
+
+            atom_str_ls = strip_items(line.split(' v '))
+            assert len(atom_str_ls) > 1, 'rule length must be greater than 1, but get %s' % line
+
+            atom_ls = []
+            rule_weight = 0.0
+            for i, atom_str in enumerate(atom_str_ls):
+                if i == 0:
+                    m = first_atom_reg.match(atom_str)
+                    assert m is not None, 'matching atom failed for %s' % atom_str
+                    rule_weight = float(m.group(1))
+                    neg = m.group(2) == '!'
+                    pred_name = m.group(3).strip()
+                    var_name_ls = strip_items(m.group(4).split(','))
+                else:
+                    m = atom_reg.match(atom_str)
+                    assert m is not None, 'matching atom failed for %s' % atom_str
+                    neg = m.group(1) == '!'
+                    pred_name = m.group(2).strip()
+                    var_name_ls = strip_items(m.group(3).split(','))
+
+                atom = Atom(neg, pred_name, var_name_ls, PRED_DICT[pred_name].var_types)
+                atom_ls.append(atom)
+
+            rule = Formula(atom_ls, rule_weight)
+            rule_ls.append(rule)
+
+        return fact_ls, rule_ls, valid_ls, query_ls
+
+************************************
+
+continuation of ./data_process/preprocess.py
+    def preprocess_kinship(ppath, fpath, rpath, qpath):
+        """
+
+        :param ppath:
+            predicate file path
+        :param fpath:
+            facts file path
+        :param rpath:
+            rule file path
+        :param qpath:
+            query file path
+
+        :return:
+
+        """
+
+        assert all(map(isfile, [ppath, fpath, rpath, qpath]))
+
+        strip_items = lambda ls: list(map(lambda x: x.strip(), ls))
+
+        pred_reg = re.compile(r'(.*)\((.*)\)')
+
+        with open(ppath) as f:
+            for line in f:
+
+                # skip empty lines
+                if line.strip() == '':
+                    continue
+
+                m = pred_reg.match(line.strip())
+                assert m is not None, 'matching predicate failed for %s' % line
+
+                name, var_types = m.group(1), m.group(2)
+                var_types = list(map(lambda x: x.strip(), var_types.split(',')))
+
+                PRED_DICT[name] = Predicate(name, var_types)
+                TYPE_SET.update(var_types)
+
+        fact_ls = []
+        fact_reg = re.compile(r'(!?)(.*)\((.*)\)')
+        with open(fpath) as f:
+            for line in f:
+
+                # skip empty lines
+                if line.strip() == '':
+                    continue
+
+                m = fact_reg.match(line.strip())
+                assert m is not None, 'matching fact failed for %s' % line
+
+                val = 0 if m.group(1) == '!' else 1
+                name, consts = m.group(2), m.group(3)
+                consts = strip_items(consts.split(','))
+
+                fact_ls.append(Fact(name, consts, val))
+
+                for var_type in PRED_DICT[name].var_types:
+                    const_dict.add_const(var_type, consts.pop(0))
+
+        rule_ls = []
+        first_atom_reg = re.compile(r'([\d.]+) (!?)([\w\d]+)\((.*)\)')
+        atom_reg = re.compile(r'(!?)([\w\d]+)\((.*)\)')
+        with open(rpath) as f:
+            for line in f:
+
+                # skip empty lines
+                if line.strip() == '':
+                    continue
+
+                atom_str_ls = strip_items(line.strip().split(' v '))
+                assert len(atom_str_ls) > 1, 'rule length must be greater than 1, but get %s' % line
+
+                atom_ls = []
+                rule_weight = 0.0
+                for i, atom_str in enumerate(atom_str_ls):
+                    if i == 0:
+                        m = first_atom_reg.match(atom_str)
+                        assert m is not None, 'matching atom failed for %s' % atom_str
+                        rule_weight = float(m.group(1))
+                        neg = m.group(2) == '!'
+                        pred_name = m.group(3).strip()
+                        var_name_ls = strip_items(m.group(4).split(','))
+                    else:
+                        m = atom_reg.match(atom_str)
+                        assert m is not None, 'matching atom failed for %s' % atom_str
+                        neg = m.group(1) == '!'
+                        pred_name = m.group(2).strip()
+                        var_name_ls = strip_items(m.group(3).split(','))
+
+                    atom = Atom(neg, pred_name, var_name_ls, PRED_DICT[pred_name].var_types)
+                    atom_ls.append(atom)
+
+                rule = Formula(atom_ls, rule_weight)
+                rule_ls.append(rule)
+
+        query_ls = []
+        with open(qpath) as f:
+            for line in f:
+
+                # skip empty lines
+                if line.strip() == '':
+                    continue
+
+                m = fact_reg.match(line.strip())
+                assert m is not None, 'matching fact failed for %s' % line
+
+                val = 0 if m.group(1) == '!' else 1
+                name, consts = m.group(2), m.group(3)
+                consts = strip_items(consts.split(','))
+
+                query_ls.append(Fact(name, consts, val))
+
+                for var_type in PRED_DICT[name].var_types:
+                    const_dict.add_const(var_type, consts.pop(0))
+
+        return fact_ls, rule_ls, query_ls
+
+******************************************************************************************************************************************
+
+Remember the code:
+
+./main/train.py
+    standard imports:
+        import torch
+        from model.mean_field_posterior import FactorizedPosterior
+        from model.gcn import GCN, TrainableEmbedding
+        from model.mln import ConditionalMLN
+        from data_process.dataset import Dataset
+        from common.cmd_args import cmd_args
+        from tqdm import tqdm
+        import torch.optim as optim
+        from model.graph import KnowledgeGraph
+        from common.predicate import PRED_DICT
+        from common.utils import EarlyStopMonitor, get_lr, count_parameters
+        from common.evaluate import gen_eval_query
+        from itertools import chain
+        import random
+        import numpy as np
+        from sklearn.metrics import roc_auc_score, average_precision_score
+        from os.path import join as joinpath
+        import os
+        import math
+        from collections import Counter
+
+***************************
+
+    def train(cmd_args):
+        if not os.path.exists(cmd_args.exp_path):
+            os.makedirs(cmd_args.exp_path)
+
+        with open(joinpath(cmd_args.exp_path, 'options.txt'), 'w') as f:
+            param_dict = vars(cmd_args)
+            for param in param_dict:
+            f.write(param + ' = ' + str(param_dict[param]) + '\n')
+
+        logpath = joinpath(cmd_args.exp_path, 'eval.result')
+        param_cnt_path = joinpath(cmd_args.exp_path, 'param_count.txt')
+
+        # dataset and KG
+        dataset = Dataset(cmd_args.data_root, cmd_args.batchsize,
+                            cmd_args.shuffle_sampling, load_method=cmd_args.load_method)
+        kg = KnowledgeGraph(dataset.fact_dict, PRED_DICT, dataset)
+
+        # model
+        if cmd_args.use_gcn == 1:
+            gcn = GCN(kg, cmd_args.embedding_size - cmd_args.gcn_free_size, cmd_args.gcn_free_size,
+                    num_hops=cmd_args.num_hops, num_layers=cmd_args.num_mlp_layers,
+                    transductive=cmd_args.trans == 1).to(cmd_args.device)
+        else:
+            gcn = TrainableEmbedding(kg, cmd_args.embedding_size).to(cmd_args.device)
+        posterior_model = FactorizedPosterior(kg, cmd_args.embedding_size, cmd_args.slice_dim).to(cmd_args.device)
+        mln = ConditionalMLN(cmd_args, dataset.rule_ls)
+
+        if cmd_args.model_load_path is not None:
+            gcn.load_state_dict(torch.load(joinpath(cmd_args.model_load_path, 'gcn.model')))
+            posterior_model.load_state_dict(torch.load(joinpath(cmd_args.model_load_path, 'posterior.model')))
+
+        # optimizers
+        monitor = EarlyStopMonitor(cmd_args.patience)
+        all_params = chain.from_iterable([posterior_model.parameters(), gcn.parameters()])
+        optimizer = optim.Adam(all_params, lr=cmd_args.learning_rate, weight_decay=cmd_args.l2_coef)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', factor=cmd_args.lr_decay_factor,
+                                                        patience=cmd_args.lr_decay_patience, min_lr=cmd_args.lr_decay_min)
+
+        with open(param_cnt_path, 'w') as f:
+            cnt_gcn_params = count_parameters(gcn)
+            cnt_posterior_params = count_parameters(posterior_model)
+            if cmd_args.use_gcn == 1:
+            f.write('GCN params count: %d\n' % cnt_gcn_params)
+            elif cmd_args.use_gcn == 0:
+            f.write('plain params count: %d\n' % cnt_gcn_params)
+            f.write('posterior params count: %d\n' % cnt_posterior_params)
+            f.write('Total params count: %d\n' % (cnt_gcn_params + cnt_posterior_params))
+
+        if cmd_args.no_train == 1:
+            cmd_args.num_epochs = 0
+
+        # for Freebase data
+        if cmd_args.load_method == 1:
+
+            # prepare data for M-step
+            tqdm.write('preparing data for M-step...')
+            pred_arg1_set_arg2 = dict()
+            pred_arg2_set_arg1 = dict()
+            pred_fact_set = dict()
+            for pred in dataset.fact_dict_2:
+            pred_arg1_set_arg2[pred] = dict()
+            pred_arg2_set_arg1[pred] = dict()
+            pred_fact_set[pred] = set()
+            for _, args in dataset.fact_dict_2[pred]:
+                if args[0] not in pred_arg1_set_arg2[pred]:
+                pred_arg1_set_arg2[pred][args[0]] = set()
+                if args[1] not in pred_arg2_set_arg1[pred]:
+                pred_arg2_set_arg1[pred][args[1]] = set()
+                pred_arg1_set_arg2[pred][args[0]].add(args[1])
+                pred_arg2_set_arg1[pred][args[1]].add(args[0])
+                pred_fact_set[pred].add(args)
+
+            grounded_rules = []
+            for rule_idx, rule in enumerate(dataset.rule_ls):
+            grounded_rules.append(set())
+            body_atoms = []
+            head_atom = None
+            for atom in rule.atom_ls:
+                if atom.neg:
+                body_atoms.append(atom)
+                elif head_atom is None:
+                head_atom = atom
+            # atom in body must be observed
+            assert len(body_atoms) <= 2
+            if len(body_atoms) > 0:
+                body1 = body_atoms[0]
+                for _, body1_args in dataset.fact_dict_2[body1.pred_name]:
+                var2arg = dict()
+                var2arg[body1.var_name_ls[0]] = body1_args[0]
+                var2arg[body1.var_name_ls[1]] = body1_args[1]
+                for body2 in body_atoms[1:]:
+                    if body2.var_name_ls[0] in var2arg:
+                    if var2arg[body2.var_name_ls[0]] in pred_arg1_set_arg2[body2.pred_name]:
+                        for body2_arg2 in pred_arg1_set_arg2[body2.pred_name][var2arg[body2.var_name_ls[0]]]:
+                        var2arg[body2.var_name_ls[1]] = body2_arg2
+                        grounded_rules[rule_idx].add(tuple(sorted(var2arg.items())))
+                    elif body2.var_name_ls[1] in var2arg:
+                    if var2arg[body2.var_name_ls[1]] in pred_arg2_set_arg1[body2.pred_name]:
+                        for body2_arg1 in pred_arg2_set_arg1[body2.pred_name][var2arg[body2.var_name_ls[1]]]:
+                        var2arg[body2.var_name_ls[0]] = body2_arg1
+                        grounded_rules[rule_idx].add(tuple(sorted(var2arg.items())))
+
+            # Collect head atoms derived by grounded formulas
+            grounded_obs = dict()
+            grounded_hid = dict()
+            grounded_hid_score = dict()
+            cnt_hid = 0
+            for rule_idx in range(len(dataset.rule_ls)):
+            rule = dataset.rule_ls[rule_idx]
+            for var2arg in grounded_rules[rule_idx]:
+                var2arg = dict(var2arg)
+                head_atom = rule.atom_ls[-1]
+                assert not head_atom.neg    # head atom
+                pred = head_atom.pred_name
+                args = (var2arg[head_atom.var_name_ls[0]], var2arg[head_atom.var_name_ls[1]])
+                if args in pred_fact_set[pred]:
+                if (pred, args) not in grounded_obs:
+                    grounded_obs[(pred, args)] = []
+                grounded_obs[(pred, args)].append(rule_idx)
+                else:
+                if (pred, args) not in grounded_hid:
+                    grounded_hid[(pred, args)] = []
+                grounded_hid[(pred, args)].append(rule_idx)
+            tqdm.write('observed: %d, hidden: %d' % (len(grounded_obs), len(grounded_hid)))
+
+            # Aggregate atoms by predicates for fast inference
+            pred_aggregated_hid = dict()
+            pred_aggregated_hid_args = dict()
+            for (pred, args) in grounded_hid:
+            if pred not in pred_aggregated_hid:
+                pred_aggregated_hid[pred] = []
+            if pred not in pred_aggregated_hid_args:
+                pred_aggregated_hid_args[pred] = []
+            pred_aggregated_hid[pred].append((dataset.const2ind[args[0]], dataset.const2ind[args[1]]))
+            pred_aggregated_hid_args[pred].append(args)
+            pred_aggregated_hid_list = [[pred, pred_aggregated_hid[pred]] for pred in sorted(pred_aggregated_hid.keys())]
+
+            for current_epoch in range(cmd_args.num_epochs):
+
+            # E-step: optimize the parameters in the posterior model
+            num_batches = int(math.ceil(len(dataset.test_fact_ls) / cmd_args.batchsize))
+
+            pbar = tqdm(total=num_batches)
+            acc_loss = 0.0
+            cur_batch = 0
+
+            for samples_by_r, latent_mask_by_r, neg_mask_by_r, obs_var_by_r, neg_var_by_r in \
+                dataset.get_batch_by_q(cmd_args.batchsize):
+
+                node_embeds = gcn(dataset)
+
+                loss = 0.0
+                r_cnt = 0
+                for ind, samples in enumerate(samples_by_r):
+                neg_mask = neg_mask_by_r[ind]
+                latent_mask = latent_mask_by_r[ind]
+                obs_var = obs_var_by_r[ind]
+                neg_var = neg_var_by_r[ind]
+
+                if sum([len(e[1]) for e in neg_mask]) == 0:
+                    continue
+
+                potential, posterior_prob, obs_xent = posterior_model([samples, neg_mask, latent_mask,
+                                                                        obs_var, neg_var],
+                                                                        node_embeds, fast_mode=True)
+
+                if cmd_args.no_entropy == 1:
+                    entropy = 0
+                else:
+                    entropy = compute_entropy(posterior_prob) / cmd_args.entropy_temp
+
+                loss += - (potential.sum() * dataset.rule_ls[ind].weight + entropy) / (potential.size(0) + 1e-6) + obs_xent
+
+                r_cnt += 1
+
+                if r_cnt > 0:
+                loss /= r_cnt
+                acc_loss += loss.item()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                pbar.update()
+                cur_batch += 1
+                pbar.set_description(
+                'Epoch %d, train loss: %.4f, lr: %.4g' % (current_epoch, acc_loss / cur_batch, get_lr(optimizer)))
+
+            # M-step: optimize the weights of logic rules
+            with torch.no_grad():
+                posterior_prob = posterior_model(pred_aggregated_hid_list, node_embeds, fast_inference_mode=True)
+                for pred_i, (pred, var_ls) in enumerate(pred_aggregated_hid_list):
+                for var_i, var in enumerate(var_ls):
+                    args = pred_aggregated_hid_args[pred][var_i]
+                    grounded_hid_score[(pred, args)] = posterior_prob[pred_i][var_i]
+
+                rule_weight_gradient = torch.zeros(len(dataset.rule_ls))
+                for (pred, args) in grounded_obs:
+                for rule_idx in set(grounded_obs[(pred, args)]):
+                    rule_weight_gradient[rule_idx] += 1.0 - compute_MB_proba(dataset.rule_ls, grounded_obs[(pred, args)])
+                for (pred, args) in grounded_hid:
+                for rule_idx in set(grounded_hid[(pred, args)]):
+                    target = grounded_hid_score[(pred, args)]
+                    rule_weight_gradient[rule_idx] += target - compute_MB_proba(dataset.rule_ls, grounded_hid[(pred, args)])
+
+                for rule_idx, rule in enumerate(dataset.rule_ls):
+                rule.weight += cmd_args.learning_rate_rule_weights * rule_weight_gradient[rule_idx]
+                print(dataset.rule_ls[rule_idx].weight, end=' ')
+
+            pbar.close()
+
+            # validation
+            with torch.no_grad():
+                node_embeds = gcn(dataset)
+
+                valid_loss = 0.0
+                cnt_batch = 0
+                for samples_by_r, latent_mask_by_r, neg_mask_by_r, obs_var_by_r, neg_var_by_r in \
+                    dataset.get_batch_by_q(cmd_args.batchsize, validation=True):
+                loss = 0.0
+                r_cnt = 0
+                for ind, samples in enumerate(samples_by_r):
+                    neg_mask = neg_mask_by_r[ind]
+                    latent_mask = latent_mask_by_r[ind]
+                    obs_var = obs_var_by_r[ind]
+                    neg_var = neg_var_by_r[ind]
+
+                    if sum([len(e[1]) for e in neg_mask]) == 0:
+                    continue
+
+                    valid_potential, valid_prob, valid_obs_xent = posterior_model([samples, neg_mask, latent_mask,
+                                                                                obs_var, neg_var],
+                                                                                node_embeds, fast_mode=True)
+
+                    if cmd_args.no_entropy == 1:
+                    valid_entropy = 0
+                    else:
+                    valid_entropy = compute_entropy(valid_prob) / cmd_args.entropy_temp
+
+                    loss += - (valid_potential.sum() + valid_entropy) / (valid_potential.size(0) + 1e-6) + valid_obs_xent
+
+                    r_cnt += 1
+
+                if r_cnt > 0:
+                    loss /= r_cnt
+                    valid_loss += loss.item()
+
+                cnt_batch += 1
+
+                tqdm.write('Epoch %d, valid loss: %.4f' % (current_epoch, valid_loss / cnt_batch))
+
+                should_stop = monitor.update(valid_loss)
+                scheduler.step(valid_loss)
+
+                is_current_best = monitor.cnt == 0
+                if is_current_best:
+                savepath = joinpath(cmd_args.exp_path, 'saved_model')
+                os.makedirs(savepath, exist_ok=True)
+                torch.save(gcn.state_dict(), joinpath(savepath, 'gcn.model'))
+                torch.save(posterior_model.state_dict(), joinpath(savepath, 'posterior.model'))
+
+                should_stop = should_stop or (current_epoch + 1 == cmd_args.num_epochs)
+
+                if should_stop:
+                tqdm.write('Early stopping')
+                break
+
+            # ======================= generate rank list =======================
+            node_embeds = gcn(dataset)
+
+            pbar = tqdm(total=len(dataset.test_fact_ls))
+            pbar.write('*' * 10 + ' Evaluation ' + '*' * 10)
+            rrank = 0.0
+            hits = 0.0
+            cnt = 0
+
+            rrank_pred = dict([(pred_name, 0.0) for pred_name in PRED_DICT])
+            hits_pred = dict([(pred_name, 0.0) for pred_name in PRED_DICT])
+            cnt_pred = dict([(pred_name, 0.0) for pred_name in PRED_DICT])
+
+            for pred_name, X, invX, sample in gen_eval_query(dataset, const2ind=kg.ent2idx):
+            x_mat = np.array(X)
+            invx_mat = np.array(invX)
+            sample_mat = np.array(sample)
+
+            tail_score, head_score, true_score = posterior_model([pred_name, x_mat, invx_mat, sample_mat], node_embeds,
+                                                                batch_mode=True)
+
+            rank = torch.sum(tail_score >= true_score).item() + 1
+            rrank += 1.0 / rank
+            hits += 1 if rank <= 10 else 0
+
+            rrank_pred[pred_name] += 1.0 / rank
+            hits_pred[pred_name] += 1 if rank <= 10 else 0
+
+            rank = torch.sum(head_score >= true_score).item() + 1
+            rrank += 1.0 / rank
+            hits += 1 if rank <= 10 else 0
+
+            rrank_pred[pred_name] += 1.0 / rank
+            hits_pred[pred_name] += 1 if rank <= 10 else 0
+
+            cnt_pred[pred_name] += 2
+            cnt += 2
+
+            if cnt % 100 == 0:
+                with open(logpath, 'w') as f:
+                f.write('%i sample eval\n' % cnt)
+                f.write('mmr %.4f\n' % (rrank / cnt))
+                f.write('hits %.4f\n' % (hits / cnt))
+
+                f.write('\n')
+                for pred_name in PRED_DICT:
+                    if cnt_pred[pred_name] == 0:
+                    continue
+                    f.write('mmr %s %.4f\n' % (pred_name, rrank_pred[pred_name] / cnt_pred[pred_name]))
+                    f.write('hits %s %.4f\n' % (pred_name, hits_pred[pred_name] / cnt_pred[pred_name]))
+
+            pbar.update()
+
+            with open(logpath, 'w') as f:
+            f.write('complete\n')
+            f.write('mmr %.4f\n' % (rrank / cnt))
+            f.write('hits %.4f\n' % (hits / cnt))
+            f.write('\n')
+
+            tqdm.write('mmr %.4f\n' % (rrank / cnt))
+            tqdm.write('hits %.4f\n' % (hits / cnt))
+
+            for pred_name in PRED_DICT:
+                if cnt_pred[pred_name] == 0:
+                continue
+                f.write('mmr %s %.4f\n' % (pred_name, rrank_pred[pred_name] / cnt_pred[pred_name]))
+                f.write('hits %s %.4f\n' % (pred_name, hits_pred[pred_name] / cnt_pred[pred_name]))
+
+            os.system('mv %s %s' % (logpath, joinpath(cmd_args.exp_path,
+                                                    'performance_hits_%.4f_mmr_%.4f.txt' % ((hits / cnt), (rrank / cnt)))))
+            pbar.close()
+
+        # for Kinship / UW-CSE / Cora data
+        elif cmd_args.load_method == 0:
+            for current_epoch in range(cmd_args.num_epochs):
+            pbar = tqdm(range(cmd_args.num_batches))
+            acc_loss = 0.0
+
+            for k in pbar:
+                node_embeds = gcn(dataset)
+
+                batch_neg_mask, flat_list, batch_latent_var_inds, observed_rule_cnts, batch_observed_vars = dataset.get_batch_rnd(
+                observed_prob=cmd_args.observed_prob,
+                filter_latent=cmd_args.filter_latent == 1,
+                closed_world=cmd_args.closed_world == 1,
+                filter_observed=1)
+
+                posterior_prob = posterior_model(flat_list, node_embeds)
+
+                if cmd_args.no_entropy == 1:
+                entropy = 0
+                else:
+                entropy = compute_entropy(posterior_prob) / cmd_args.entropy_temp
+
+                entropy = entropy.to('cpu')
+                posterior_prob = posterior_prob.to('cpu')
+
+                potential = mln(batch_neg_mask, batch_latent_var_inds, observed_rule_cnts, posterior_prob,
+                                flat_list, batch_observed_vars)
+
+                optimizer.zero_grad()
+
+                loss = - (potential + entropy) / cmd_args.batchsize
+                acc_loss += loss.item()
+
+                loss.backward()
+
+                optimizer.step()
+
+                pbar.set_description('train loss: %.4f, lr: %.4g' % (acc_loss / (k + 1), get_lr(optimizer)))
+
+            # test
+            node_embeds = gcn(dataset)
+            with torch.no_grad():
+
+                posterior_prob = posterior_model([(e[1], e[2]) for e in dataset.test_fact_ls], node_embeds)
+                posterior_prob = posterior_prob.to('cpu')
+
+                label = np.array([e[0] for e in dataset.test_fact_ls])
+                test_log_prob = float(np.sum(np.log(np.clip(np.abs((1 - label) - posterior_prob.numpy()), 1e-6, 1 - 1e-6))))
+
+                auc_roc = roc_auc_score(label, posterior_prob.numpy())
+                auc_pr = average_precision_score(label, posterior_prob.numpy())
+
+                tqdm.write('Epoch: %d, train loss: %.4f, test auc-roc: %.4f, test auc-pr: %.4f, test log prob: %.4f' % (
+                current_epoch, acc_loss / cmd_args.num_batches, auc_roc, auc_pr, test_log_prob))
+                # tqdm.write(str(posterior_prob[:10]))
+
+            # validation for early stop
+            valid_sample = []
+            valid_label = []
+            for pred_name in dataset.valid_dict_2:
+                for val, consts in dataset.valid_dict_2[pred_name]:
+                valid_sample.append((pred_name, consts))
+                valid_label.append(val)
+            valid_label = np.array(valid_label)
+            
+            valid_prob = posterior_model(valid_sample, node_embeds)
+            valid_prob = valid_prob.to('cpu')
+            
+            valid_log_prob = float(np.sum(np.log(np.clip(np.abs((1 - valid_label) - valid_prob.numpy()), 1e-6, 1 - 1e-6))))
+            
+            # tqdm.write('epoch: %d, valid log prob: %.4f' % (current_epoch, valid_log_prob))
+            # 
+            # should_stop = monitor.update(-valid_log_prob)
+            # scheduler.step(valid_log_prob)
+            # 
+            # is_current_best = monitor.cnt == 0
+            # if is_current_best:
+            #   savepath = joinpath(cmd_args.exp_path, 'saved_model')
+            #   os.makedirs(savepath, exist_ok=True)
+            #   torch.save(gcn.state_dict(), joinpath(savepath, 'gcn.model'))
+            #   torch.save(posterior_model.state_dict(), joinpath(savepath, 'posterior.model'))
+            #
+            # should_stop = should_stop or (current_epoch + 1 == cmd_args.num_epochs)
+            #
+            # if should_stop:
+            #   tqdm.write('Early stopping')
+            #   break
+
+            # evaluation after training
+            node_embeds = gcn(dataset)
+            with torch.no_grad():
+            posterior_prob = posterior_model([(e[1], e[2]) for e in dataset.test_fact_ls], node_embeds)
+            posterior_prob = posterior_prob.to('cpu')
+
+            label = np.array([e[0] for e in dataset.test_fact_ls])
+            test_log_prob = float(np.sum(np.log(np.clip(np.abs((1 - label) - posterior_prob.numpy()), 1e-6, 1 - 1e-6))))
+
+            auc_roc = roc_auc_score(label, posterior_prob.numpy())
+            auc_pr = average_precision_score(label, posterior_prob.numpy())
+
+            tqdm.write('test auc-roc: %.4f, test auc-pr: %.4f, test log prob: %.4f' % (auc_roc, auc_pr, test_log_prob))
+
+******************************
+
+    def compute_entropy(posterior_prob):
+        eps = 1e-6
+        posterior_prob.clamp_(eps, 1 - eps)
+        compl_prob = 1 - posterior_prob
+        entropy = -(posterior_prob * torch.log(posterior_prob) + compl_prob * torch.log(compl_prob)).sum()
+        return entropy
+
+    def compute_MB_proba(rule_ls, ls_rule_idx):
+        rule_idx_cnt = Counter(ls_rule_idx)
+        numerator = 0
+        for rule_idx in rule_idx_cnt:
+            weight = rule_ls[rule_idx].weight
+            cnt = rule_idx_cnt[rule_idx]
+            numerator += math.exp(weight * cnt)
+        return numerator / (numerator + 1.0)
+
+    if __name__ == '__main__':
+        random.seed(cmd_args.seed)
+        np.random.seed(cmd_args.seed)
+        torch.manual_seed(cmd_args.seed)
+
+        train(cmd_args)
+
+
+***************************************************************************************************************************************
+
+Remember the code:
+
+./model/gcn.py
+    import torch
+    import torch.nn as nn
+    import numpy as np
+    import torch.nn.functional as F
+    from model.mlp import MLP
+    from common.cmd_args import cmd_args
+
+
+    def prepare_node_feature(graph, transductive=True):
+    if transductive:
+        node_feat = torch.zeros(graph.num_nodes,                          # for transductive GCN
+                                graph.num_ents + graph.num_rels)
+        
+        const_nodes = []
+        for i in graph.idx2node:
+        if isinstance(graph.idx2node[i], str):      # const (entity) node
+            const_nodes.append(i)
+            node_feat[i][i] = 1
+        elif isinstance(graph.idx2node[i], tuple):  # fact node
+            rel, args = graph.idx2node[i]
+            node_feat[i][graph.num_ents + graph.rel2idx[rel]] = 1
+    else:
+        node_feat = torch.zeros(graph.num_nodes, 1 + graph.num_rels)      # for inductive GCN
+        const_nodes = []
+        for i in graph.idx2node:
+        if isinstance(graph.idx2node[i], str):      # const (entity) node
+            node_feat[i][0] = 1
+            const_nodes.append(i)
+        elif isinstance(graph.idx2node[i], tuple):  # fact node
+            rel, args = graph.idx2node[i]
+            node_feat[i][1 + graph.rel2idx[rel]] = 1
+    
+    return node_feat, torch.LongTensor(const_nodes)
+
+
+    class TrainableEmbedding(nn.Module):
+    def __init__(self, graph, latent_dim):
+        super(TrainableEmbedding, self).__init__()
+        
+        self.num_ents = graph.num_ents
+        self.ent_embeds = nn.Embedding(self.num_ents, latent_dim)
+        self.ents = torch.arange(self.num_ents).to(cmd_args.device)
+        
+        torch.nn.init.kaiming_uniform_(self.ent_embeds.weight)
+
+    def forward(self, batch_data):
+        node_embeds = self.ent_embeds(self.ents)
+        return node_embeds
+        
+
+    class GCN(nn.Module):
+    def __init__(self, graph, latent_dim, free_dim, num_hops=5, num_layers=2, transductive=True):
+        super(GCN, self).__init__()
+        
+        self.graph = graph
+        self.latent_dim = latent_dim
+        self.free_dim = free_dim
+        self.num_hops = num_hops
+        self.num_layers = num_layers
+        
+        self.num_ents = graph.num_ents
+        self.num_rels = graph.num_rels
+        self.num_nodes = graph.num_nodes
+        self.num_edges = graph.num_edges
+        self.num_edge_types = len(graph.edge_type2idx)
+        
+        self.edge2node_in, self.edge2node_out, self.node_degree, \
+            self.edge_type_masks, self.edge_direction_masks = self.gen_edge2node_mapping()
+        
+        self.node_feat, self.const_nodes = prepare_node_feature(graph, transductive=transductive)
+        
+        if not transductive:
+        self.node_feat_dim = 1 + self.num_rels
+        else:
+        self.node_feat_dim = self.num_ents + self.num_rels
+        
+        self.init_node_linear = nn.Linear(self.node_feat_dim, latent_dim, bias=False)
+        
+        for param in self.init_node_linear.parameters():
+        param.requires_grad = False
+
+        self.node_feat = self.node_feat.to(cmd_args.device)
+        self.const_nodes = self.const_nodes.to(cmd_args.device)
+        self.edge2node_in = self.edge2node_in.to(cmd_args.device)
+        self.edge2node_out = self.edge2node_out.to(cmd_args.device)
+        self.edge_type_masks = [mask.to(cmd_args.device) for mask in self.edge_type_masks]
+        self.edge_direction_masks = [mask.to(cmd_args.device) for mask in self.edge_direction_masks]
+
+        self.MLPs = nn.ModuleList()
+        for _ in range(self.num_hops):
+        self.MLPs.append(MLP(input_size=self.latent_dim, num_layers=self.num_layers,
+                            hidden_size=self.latent_dim, output_size=self.latent_dim))
+        
+        self.edge_type_W = nn.ModuleList()
+        for _ in range(self.num_edge_types):
+        ml_edge_type = nn.ModuleList()
+        for _ in range(self.num_hops):
+            ml_hop = nn.ModuleList()
+            for _ in range(2):    # 2 directions of edges
+            ml_hop.append(nn.Linear(latent_dim, latent_dim, bias=False))
+            ml_edge_type.append(ml_hop)
+        self.edge_type_W.append(ml_edge_type)
+        
+        self.const_nodes_free_params = nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(self.num_ents, free_dim)))
+
+        
+    def gen_edge2node_mapping(self):
+        ei = 0        # edge index with direction
+        edge_idx = 0  # edge index without direction
+        edge2node_in = torch.zeros(self.num_edges * 2, dtype=torch.long)
+        edge2node_out = torch.zeros(self.num_edges * 2, dtype=torch.long)
+        node_degree = torch.zeros(self.num_nodes)
+
+        edge_type_masks = []
+        for _ in range(self.num_edge_types):
+        edge_type_masks.append(torch.zeros(self.num_edges * 2))
+        edge_direction_masks = []
+        for _ in range(2):    # 2 directions of edges
+        edge_direction_masks.append(torch.zeros(self.num_edges * 2))
+        
+        for ni, nj in torch.as_tensor(self.graph.edge_pairs):
+        edge_type = self.graph.edge_types[edge_idx]
+        edge_idx += 1
+        
+        edge2node_in[ei] = nj
+        edge2node_out[ei] = ni
+        node_degree[ni] += 1
+        edge_type_masks[edge_type][ei] = 1
+        edge_direction_masks[0][ei] = 1
+        ei += 1
+        
+        edge2node_in[ei] = ni
+        edge2node_out[ei] = nj
+        node_degree[nj] += 1
+        edge_type_masks[edge_type][ei] = 1
+        edge_direction_masks[1][ei] = 1
+        ei += 1
+        
+        edge2node_in = edge2node_in.view(-1, 1).expand(-1, self.latent_dim)
+        edge2node_out = edge2node_out.view(-1, 1).expand(-1, self.latent_dim)
+        node_degree = node_degree.view(-1, 1)
+        return edge2node_in, edge2node_out, node_degree, edge_type_masks, edge_direction_masks
+    
+    
+    def forward(self, batch_data):
+        """
+            run gcn with knowledge graph and get embeddings for ground predicates (i.e. variables)
+
+        :param batch_data:
+            sampled data batch (a set of grounded formulas)
+        :return:
+            embeddings of all entities and relations
+        """
+        
+        node_embeds = self.init_node_linear(self.node_feat)
+
+        hop = 0
+        hidden = node_embeds
+        while hop < self.num_hops:
+        node_aggregate = torch.zeros_like(hidden)
+        for edge_type in set(self.graph.edge_types):
+            for direction in range(2):
+            W = self.edge_type_W[edge_type][hop][direction]
+            W_nodes = W(hidden)
+            nodes_attached_on_edges_out = torch.gather(W_nodes, 0, self.edge2node_out)
+            nodes_attached_on_edges_out *= self.edge_type_masks[edge_type].view(-1, 1)
+            nodes_attached_on_edges_out *= self.edge_direction_masks[direction].view(-1, 1)
+            node_aggregate.scatter_add_(0, self.edge2node_in, nodes_attached_on_edges_out)
+
+        hidden = self.MLPs[hop](hidden + node_aggregate)
+        hop += 1
+
+        read_out_const_nodes_embed = torch.cat((hidden[self.const_nodes], self.const_nodes_free_params), dim=1)
+
+        return read_out_const_nodes_embed
+
+****************************************************************************************************************************************
+
+Remember the code:
+
+./model/graph.py
+    import networkx as nx
+    import numpy as np
+    from common.predicate import PRED_DICT
+    from itertools import product
+
+
+    class KnowledgeGraph(object):
+    def __init__(self, facts, predicates, dataset):
+        self.dataset = dataset
+        self.graph, self.edge_type2idx, \
+            self.ent2idx, self.idx2ent, self.rel2idx, self.idx2rel, \
+            self.node2idx, self.idx2node = gen_graph(facts, predicates, dataset)
+        
+        self.num_ents = len(self.ent2idx)
+        self.num_rels = len(self.rel2idx)
+        
+        self.num_nodes = len(self.graph.nodes())
+        self.num_edges = len(self.graph.edges())
+        
+        x, y, v = zip(*sorted(self.graph.edges(data=True), key=lambda t: t[:2]))
+        self.edge_types = [d['edge_type'] for d in v]
+        # self.edge_pairs = np.ndarray(shape=(self.num_edges, 2), dtype=np.long)
+        self.edge_pairs = np.ndarray(shape=(self.num_edges, 2), dtype=np.int64)
+        self.edge_pairs[:, 0] = x
+        self.edge_pairs[:, 1] = y
+        
+        self.idx2edge = dict()
+        idx = 0
+        for x, y in self.edge_pairs:
+        self.idx2edge[idx] = (self.idx2node[x], self.idx2node[y])
+        idx += 1
+        self.idx2edge[idx] = (self.idx2node[y], self.idx2node[x])
+        idx += 1
+
+
+    def gen_index(facts, predicates, dataset):
+    rel2idx = dict()
+    idx_rel = 0
+    for rel in sorted(predicates.keys()):
+        if rel not in rel2idx:
+        rel2idx[rel] = idx_rel
+        idx_rel += 1
+    idx2rel = dict(zip(rel2idx.values(), rel2idx.keys()))
+    
+    ent2idx = dict()
+    idx_ent = 0
+    for type_name in sorted(dataset.const_sort_dict.keys()):
+        for const in dataset.const_sort_dict[type_name]:
+        ent2idx[const] = idx_ent
+        idx_ent += 1
+    idx2ent = dict(zip(ent2idx.values(), ent2idx.keys()))
+    
+    node2idx = ent2idx.copy()
+    idx_node = len(node2idx)
+    for rel in sorted(facts.keys()):
+        for fact in sorted(list(facts[rel])):
+        val, args = fact
+        if (rel, args) not in node2idx:
+            node2idx[(rel, args)] = idx_node
+            idx_node += 1
+    idx2node = dict(zip(node2idx.values(), node2idx.keys()))
+    
+    return ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node
+
+
+    def gen_edge_type():
+    edge_type2idx = dict()
+    num_args_set = set()
+    for rel in PRED_DICT:
+        num_args = PRED_DICT[rel].num_args
+        num_args_set.add(num_args)
+    idx = 0
+    for num_args in sorted(list(num_args_set)):
+        for pos_code in product(['0', '1'], repeat=num_args):
+        if '1' in pos_code:
+            edge_type2idx[(0, ''.join(pos_code))] = idx
+            idx += 1
+            edge_type2idx[(1, ''.join(pos_code))] = idx
+            idx += 1
+    return edge_type2idx
+
+
+    def gen_graph(facts, predicates, dataset):
+    """
+        generate directed knowledge graph, where each edge is from subject to object
+    :param facts:
+        dictionary of facts
+    :param predicates:
+        dictionary of predicates
+    :param dataset:
+        dataset object
+    :return:
+        graph object, entity to index, index to entity, relation to index, index to relation
+    """
+    
+    # build bipartite graph (constant nodes and hyper predicate nodes)
+    g = nx.Graph()
+    ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node = gen_index(facts, predicates, dataset)
+
+    edge_type2idx = gen_edge_type()
+    
+    for node_idx in idx2node:
+        g.add_node(node_idx)
+    
+    for rel in facts.keys():
+        for fact in facts[rel]:
+        val, args = fact
+        fact_node_idx = node2idx[(rel, args)]
+        for arg in args:
+            pos_code = ''.join(['%d' % (arg == v) for v in args])
+            g.add_edge(fact_node_idx, node2idx[arg],
+                    edge_type=edge_type2idx[(val, pos_code)])
+    return g, edge_type2idx, ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node
+
+**************************************************************************************************************************************
+
+Remember the code:
+
+./model/mean_field_posterior.py
+    import torch
+    import torch.nn as nn
+    from common.cmd_args import cmd_args
+    from common.predicate import PRED_DICT
+    import torch.nn.functional as F
+
+
+    class FactorizedPosterior(nn.Module):
+        def __init__(self, graph, latent_dim, slice_dim=5):
+            super(FactorizedPosterior, self).__init__()
+
+            self.graph = graph
+            self.latent_dim = latent_dim
+
+            self.xent_loss = F.binary_cross_entropy_with_logits
+
+            self.device = cmd_args.device
+
+            self.num_rels = graph.num_rels
+            self.ent2idx = graph.ent2idx
+            self.rel2idx = graph.rel2idx
+            self.idx2rel = graph.idx2rel
+
+            if cmd_args.load_method == 1:
+            self.params_u_R = nn.ModuleList()
+            self.params_W_R = nn.ModuleList()
+            self.params_V_R = nn.ModuleList()
+            for idx in range(self.num_rels):
+                rel = self.idx2rel[idx]
+                num_args = PRED_DICT[rel].num_args
+                self.params_W_R.append(nn.Bilinear(num_args * latent_dim, num_args * latent_dim, slice_dim, bias=False))
+                self.params_V_R.append(nn.Linear(num_args * latent_dim, slice_dim, bias=True))
+                self.params_u_R.append(nn.Linear(slice_dim, 1, bias=False))
+            elif cmd_args.load_method == 0:
+            self.params_u_R = nn.ParameterList()
+            self.params_W_R = nn.ModuleList()
+            self.params_V_R = nn.ModuleList()
+            self.params_b_R = nn.ParameterList()
+            for idx in range(self.num_rels):
+                rel = self.idx2rel[idx]
+                num_args = PRED_DICT[rel].num_args
+                self.params_u_R.append(nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(slice_dim, 1)).view(-1)))
+                self.params_W_R.append(nn.Bilinear(num_args * latent_dim, num_args * latent_dim, slice_dim, bias=False))
+                self.params_V_R.append(nn.Linear(num_args * latent_dim, slice_dim, bias=False))
+                self.params_b_R.append(nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(slice_dim, 1)).view(-1)))
+
+        def forward(self, latent_vars, node_embeds, batch_mode=False, fast_mode=False, fast_inference_mode=False):
+            """
+            compute posterior probabilities of specified latent variables
+
+            :param latent_vars:
+                list of latent variables (i.e. unobserved facts)
+            :param node_embeds:
+                node embeddings
+            :return:
+                n-dim vector, probability of corresponding latent variable being True
+            """
+            # this mode is only for fast inference on Freebase data
+            if fast_inference_mode:
+            assert cmd_args.load_method == 1
+
+            samples = latent_vars
+            scores = []
+
+            for ind in range(len(samples)):
+                pred_name, pred_sample = samples[ind]
+
+                rel_idx = self.rel2idx[pred_name]
+
+                sample_mat = torch.tensor(pred_sample, dtype=torch.long).to(cmd_args.device) # (bsize, 2)
+
+                sample_query = torch.cat([node_embeds[sample_mat[:, 0]], node_embeds[sample_mat[:, 1]]], dim=1)
+
+                sample_score = self.params_u_R[rel_idx](torch.tanh(self.params_W_R[rel_idx](sample_query, sample_query) +
+                                                                self.params_V_R[rel_idx](sample_query))).view(-1) # (bsize)
+                scores.append(torch.sigmoid(sample_score))
+
+            return scores
+
+            # this mode is only for fast training on Freebase data
+            elif fast_mode:
+            assert cmd_args.load_method == 1
+
+            samples, neg_mask, latent_mask, obs_var, neg_var = latent_vars
+            scores = []
+            obs_probs = []
+            neg_probs = []
+
+            pos_mask_mat = torch.tensor([pred_mask[1] for pred_mask in neg_mask], dtype=torch.float).to(cmd_args.device)
+            neg_mask_mat = (pos_mask_mat == 0).type(torch.float)
+            latent_mask_mat = torch.tensor([pred_mask[1] for pred_mask in latent_mask], dtype=torch.float).to(cmd_args.device)
+            obs_mask_mat = (latent_mask_mat == 0).type(torch.float)
+
+            for ind in range(len(samples)):
+                pred_name, pred_sample = samples[ind]
+                _, obs_sample = obs_var[ind]
+                _, neg_sample = neg_var[ind]
+
+                rel_idx = self.rel2idx[pred_name]
+
+                sample_mat = torch.tensor(pred_sample, dtype=torch.long).to(cmd_args.device)
+                obs_mat = torch.tensor(obs_sample, dtype=torch.long).to(cmd_args.device)
+                neg_mat = torch.tensor(neg_sample, dtype=torch.long).to(cmd_args.device)
+
+                sample_mat = torch.cat([sample_mat, obs_mat, neg_mat], dim=0)
+
+                sample_query = torch.cat([node_embeds[sample_mat[:, 0]], node_embeds[sample_mat[:, 1]]], dim=1)
+
+                sample_score = self.params_u_R[rel_idx](torch.tanh(self.params_W_R[rel_idx](sample_query, sample_query) +
+                                                                self.params_V_R[rel_idx](sample_query))).view(-1)
+                var_prob = sample_score[len(pred_sample):]
+                obs_prob = var_prob[:len(obs_sample)]
+                neg_prob = var_prob[len(obs_sample):]
+                sample_score = sample_score[:len(pred_sample)]
+
+                scores.append(sample_score)
+                obs_probs.append(obs_prob)
+                neg_probs.append(neg_prob)
+
+            score_mat = torch.stack(scores, dim=0)
+            score_mat = torch.sigmoid(score_mat)
+
+            pos_score = (1 - score_mat) * pos_mask_mat
+            neg_score = score_mat * neg_mask_mat
+
+            potential = 1 - ((pos_score + neg_score) * latent_mask_mat + obs_mask_mat).prod(dim=0)
+
+            obs_mat = torch.cat(obs_probs, dim=0)
+
+            if obs_mat.size(0) == 0:
+                obs_loss = 0.0
+            else:
+                obs_loss = self.xent_loss(obs_mat, torch.ones_like(obs_mat), reduction='sum')
+
+            neg_mat = torch.cat(neg_probs, dim=0)
+            if neg_mat.size(0) != 0:
+                obs_loss += self.xent_loss(obs_mat, torch.zeros_like(neg_mat), reduction='sum')
+
+            obs_loss /= (obs_mat.size(0) + neg_mat.size(0) + 1e-6)
+
+            return potential, (score_mat * latent_mask_mat).view(-1), obs_loss
+
+            elif batch_mode:
+            assert cmd_args.load_method == 1
+
+            pred_name, x_mat, invx_mat, sample_mat = latent_vars
+
+            rel_idx = self.rel2idx[pred_name]
+
+            x_mat = torch.tensor(x_mat, dtype=torch.long).to(cmd_args.device)
+            invx_mat = torch.tensor(invx_mat, dtype=torch.long).to(cmd_args.device)
+            sample_mat = torch.tensor(sample_mat, dtype=torch.long).to(cmd_args.device)
+
+            tail_query = torch.cat([node_embeds[x_mat[:, 0]], node_embeds[x_mat[:, 1]]], dim=1)
+            head_query = torch.cat([node_embeds[invx_mat[:, 0]], node_embeds[invx_mat[:, 1]]], dim=1)
+            true_query = torch.cat([node_embeds[sample_mat[:, 0]], node_embeds[sample_mat[:, 1]]], dim=1)
+
+            tail_score = self.params_u_R[rel_idx](torch.tanh(self.params_W_R[rel_idx](tail_query, tail_query) +
+                                                            self.params_V_R[rel_idx](tail_query))).view(-1)
+
+            head_score = self.params_u_R[rel_idx](torch.tanh(self.params_W_R[rel_idx](head_query, head_query) +
+                                                            self.params_V_R[rel_idx](head_query))).view(-1)
+
+            true_score = self.params_u_R[rel_idx](torch.tanh(self.params_W_R[rel_idx](true_query, true_query) +
+                                                            self.params_V_R[rel_idx](true_query))).view(-1)
+
+            probas_tail = torch.sigmoid(tail_score)
+            probas_head = torch.sigmoid(head_score)
+            probas_true = torch.sigmoid(true_score)
+
+            return probas_tail, probas_head, probas_true
+
+            else:
+            assert cmd_args.load_method == 0
+
+            probas = torch.zeros(len(latent_vars)).to(cmd_args.device)
+            for i in range(len(latent_vars)):
+                rel, args = latent_vars[i]
+                args_embed = torch.cat([node_embeds[self.ent2idx[arg]] for arg in args], 0)
+                rel_idx = self.rel2idx[rel]
+
+                score = self.params_u_R[rel_idx].dot(
+                torch.tanh(self.params_W_R[rel_idx](args_embed, args_embed) +
+                            self.params_V_R[rel_idx](args_embed) +
+                            self.params_b_R[rel_idx])
+                )
+                proba = torch.sigmoid(score)
+                probas[i] = proba
+
+            return probas
+
+********************************************************************************************************************************************
+
+Remember the code:
+
+./model/mln.py
+    import torch
+    import torch.nn as nn
+    from common.predicate import PRED_DICT
+    from itertools import product
+    import torch.nn.functional as F
+
+
+    class ConditionalMLN(nn.Module):
+    
+    def __init__(self, cmd_args, rule_list):
+        super(ConditionalMLN, self).__init__()
+        
+        self.rule_weights_lin = nn.Linear(len(rule_list), 1, bias=False)
+        self.num_rules = len(rule_list)
+        self.soft_logic = False
+        
+        self.alpha_table = nn.Parameter(torch.tensor([10.0 for _ in range(len(PRED_DICT))], requires_grad=True))
+        
+        self.predname2ind = dict(e for e in zip(PRED_DICT.keys(), range(len(PRED_DICT))))
+        
+        if cmd_args.rule_weights_learning == 0:
+        self.rule_weights_lin.weight.data = torch.tensor([[rule.weight for rule in rule_list]], dtype=torch.float)
+        print('rule weights fixed as pre-defined values\n')
+        else:
+        self.rule_weights_lin.weight = nn.Parameter(
+            torch.tensor([[rule.weight for rule in rule_list]], dtype=torch.float))
+        print('rule weights set to pre-defined values, learning weights\n')
+    
+    def forward(self, neg_mask_ls_ls, latent_var_inds_ls_ls, observed_rule_cnts, posterior_prob, flat_list,
+                observed_vars_ls_ls):
+        """
+            compute the MLN potential given the posterior probability of latent variables
+        :param neg_mask_ls_ls:
+        :param posterior_prob_ls_ls:
+        :return:
+        """
+        
+        scores = torch.zeros(self.num_rules, dtype=torch.float)
+        
+        if self.soft_logic:
+        pred_name_ls = [e[0] for e in flat_list]
+        pred_ind_flat_list = [self.predname2ind[pred_name] for pred_name in pred_name_ls]
+        
+        for i in range(len(neg_mask_ls_ls)):
+        neg_mask_ls = neg_mask_ls_ls[i]
+        latent_var_inds_ls = latent_var_inds_ls_ls[i]
+        observed_vars_ls = observed_vars_ls_ls[i]
+        
+        # sum of scores from gnd rules with latent vars
+        for j in range(len(neg_mask_ls)):
+            
+            latent_neg_mask, observed_neg_mask = neg_mask_ls[j]
+            latent_var_inds = latent_var_inds_ls[j]
+            observed_vars = observed_vars_ls[j]
+            
+            z_probs = posterior_prob[latent_var_inds].unsqueeze(0)
+            
+            z_probs = torch.cat([1 - z_probs, z_probs], dim=0)
+            
+            cartesian_prod = z_probs[:, 0]
+            for j in range(1, z_probs.shape[1]):
+            cartesian_prod = torch.ger(cartesian_prod, z_probs[:, j])
+            cartesian_prod = cartesian_prod.view(-1)
+            
+            view_ls = [2 for _ in range(len(latent_neg_mask))]
+            cartesian_prod = cartesian_prod.view(*[view_ls])
+            
+            if self.soft_logic:
+            
+            # observed alpha
+            obs_vals = [e[0] for e in observed_vars]
+            pred_names = [e[1] for e in observed_vars]
+            pred_inds = [self.predname2ind[pn] for pn in pred_names]
+            alpha = self.alpha_table[pred_inds]  # alphas in this formula
+            act_alpha = torch.sigmoid(alpha)
+            obs_neg_flag = [(1 if observed_vars[i] != observed_neg_mask[i] else 0)
+                            for i in range(len(observed_vars))]
+            tn_obs_neg_flag = torch.tensor(obs_neg_flag, dtype=torch.float)
+            
+            val = torch.abs(1 - torch.tensor(obs_vals, dtype=torch.float) - act_alpha)
+            obs_score = torch.abs(tn_obs_neg_flag - val)
+            
+            # latent alpha
+            inds = product(*[[0, 1] for _ in range(len(latent_neg_mask))])
+            pred_inds = [pred_ind_flat_list[i] for i in latent_var_inds]
+            alpha = self.alpha_table[pred_inds]  # alphas in this formula
+            act_alpha = torch.sigmoid(alpha)
+            tn_latent_neg_mask = torch.tensor(latent_neg_mask, dtype=torch.float)
+            
+            for ind in inds:
+                val = torch.abs(1 - torch.tensor(ind, dtype=torch.float) - act_alpha)
+                val = torch.abs(tn_latent_neg_mask - val)
+                cartesian_prod[tuple(ind)] *= torch.max(torch.cat([val, obs_score], dim=0))
+            
+            else:
+            
+            if sum(observed_neg_mask) == 0:
+                cartesian_prod[tuple(latent_neg_mask)] = 0.0
+            
+            scores[i] += cartesian_prod.sum()
+        
+        # sum of scores from gnd rule with only observed vars
+        scores[i] += observed_rule_cnts[i]
+        
+        return self.rule_weights_lin(scores)
+    
+    def weight_update(self, neg_mask_ls_ls, latent_var_inds_ls_ls, observed_rule_cnts, posterior_prob, flat_list,
+                        observed_vars_ls_ls):
+        closed_wolrd_potentials = torch.zeros(self.num_rules, dtype=torch.float)
+        
+        if self.soft_logic:
+        pred_name_ls = [e[0] for e in flat_list]
+        pred_ind_flat_list = [self.predname2ind[pred_name] for pred_name in pred_name_ls]
+        
+        for i in range(len(neg_mask_ls_ls)):
+        neg_mask_ls = neg_mask_ls_ls[i]
+        latent_var_inds_ls = latent_var_inds_ls_ls[i]
+        observed_vars_ls = observed_vars_ls_ls[i]
+        
+        # sum of scores from gnd rules with latent vars
+        for j in range(len(neg_mask_ls)):
+            
+            latent_neg_mask, observed_neg_mask = neg_mask_ls[j]
+            latent_var_inds = latent_var_inds_ls[j]
+            observed_vars = observed_vars_ls[j]
+            
+            has_pos_atom = False
+            for val in observed_neg_mask + latent_neg_mask:
+            if val == 1:
+                has_pos_atom = True
+                break
+            
+            if has_pos_atom:
+            closed_wolrd_potentials[i] += 1
+            
+            z_probs = posterior_prob[latent_var_inds].unsqueeze(0)
+            
+            z_probs = torch.cat([1 - z_probs, z_probs], dim=0)
+            
+            cartesian_prod = z_probs[:, 0]
+            for j in range(1, z_probs.shape[1]):
+            cartesian_prod = torch.ger(cartesian_prod, z_probs[:, j])
+            cartesian_prod = cartesian_prod.view(-1)
+            
+            view_ls = [2 for _ in range(len(latent_neg_mask))]
+            cartesian_prod = cartesian_prod.view(*[view_ls])
+            
+            if self.soft_logic:
+            
+            # observed alpha
+            obs_vals = [e[0] for e in observed_vars]
+            pred_names = [e[1] for e in observed_vars]
+            pred_inds = [self.predname2ind[pn] for pn in pred_names]
+            alpha = self.alpha_table[pred_inds]  # alphas in this formula
+            act_alpha = torch.sigmoid(alpha)
+            obs_neg_flag = [(1 if observed_vars[i] != observed_neg_mask[i] else 0)
+                            for i in range(len(observed_vars))]
+            tn_obs_neg_flag = torch.tensor(obs_neg_flag, dtype=torch.float)
+            
+            val = torch.abs(1 - torch.tensor(obs_vals, dtype=torch.float) - act_alpha)
+            obs_score = torch.abs(tn_obs_neg_flag - val)
+            
+            # latent alpha
+            inds = product(*[[0, 1] for _ in range(len(latent_neg_mask))])
+            pred_inds = [pred_ind_flat_list[i] for i in latent_var_inds]
+            alpha = self.alpha_table[pred_inds]  # alphas in this formula
+            act_alpha = torch.sigmoid(alpha)
+            tn_latent_neg_mask = torch.tensor(latent_neg_mask, dtype=torch.float)
+            
+            for ind in inds:
+                val = torch.abs(1 - torch.tensor(ind, dtype=torch.float) - act_alpha)
+                val = torch.abs(tn_latent_neg_mask - val)
+                cartesian_prod[tuple(ind)] *= torch.max(torch.cat([val, obs_score], dim=0))
+            
+            else:
+            
+            if sum(observed_neg_mask) == 0:
+                cartesian_prod[tuple(latent_neg_mask)] = 0.0
+            
+        weight_grad = closed_wolrd_potentials
+        
+        return weight_grad
+
+***************************************************************************************************************************************
+
+Remember the code:
+
+./model/mlp.py
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+
+    class MLP(nn.Module):
+    def __init__(self, input_size, num_layers, hidden_size, output_size):
+        super(MLP, self).__init__()
+        
+        self.input_linear = nn.Linear(input_size, hidden_size)
+
+        self.hidden = nn.ModuleList()
+        for _ in range(num_layers - 1):
+        self.hidden.append(nn.Linear(hidden_size, hidden_size))
+        
+        self.output_linear = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        h = F.relu(self.input_linear(x))
+        
+        for layer in self.hidden:
+        h = F.relu(layer(h))
+        
+        output = self.output_linear(h)
+        
+        return output
+
+**************************************************************************************************************************************
+
+Suggest any code changes or improvement, or the things you feel can be changed in the above project that can improve the accuracy or the approach for graph completion.
+Give me code snippets for the above improvements.
+
+*******************************************************************************************************************************************
