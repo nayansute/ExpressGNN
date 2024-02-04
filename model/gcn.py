@@ -88,9 +88,12 @@ class GCN(nn.Module):
 
     self.MLPs = nn.ModuleList()
     for _ in range(self.num_hops):
-      self.MLPs.append(MLP(input_size=self.latent_dim, num_layers=self.num_layers,
-                           hidden_size=self.latent_dim, output_size=self.latent_dim))
-    
+      self.MLPs.append(nn.Sequential(
+          nn.Dropout(0.5),  # Adjust the dropout rate as needed
+          MLP(input_size=self.latent_dim, num_layers=self.num_layers,
+              hidden_size=self.latent_dim, output_size=self.latent_dim)
+      ))
+
     self.edge_type_W = nn.ModuleList()
     for _ in range(self.num_edge_types):
       ml_edge_type = nn.ModuleList()
@@ -102,8 +105,8 @@ class GCN(nn.Module):
       self.edge_type_W.append(ml_edge_type)
     
     self.const_nodes_free_params = nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(self.num_ents, free_dim)))
+    self.attention = nn.MultiheadAttention(embed_dim=self.latent_dim, num_heads=2)
 
-    
   def gen_edge2node_mapping(self):
     ei = 0        # edge index with direction
     edge_idx = 0  # edge index without direction
