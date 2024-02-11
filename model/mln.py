@@ -180,3 +180,4 @@ class ConditionalMLN(nn.Module):
       weight_grad = closed_wolrd_potentials
       
       return weight_grad
+    

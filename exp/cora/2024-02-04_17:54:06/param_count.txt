@@ -1,0 +1,3 @@
+GCN params count: 68000
+posterior params count: 1321120
+Total params count: 1389120

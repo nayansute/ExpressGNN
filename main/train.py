@@ -18,6 +18,8 @@ from os.path import join as joinpath
 import os
 import math
 from collections import Counter
+import pandas as pd
+from datetime import datetime
 
 
 def train(cmd_args):
@@ -361,7 +363,9 @@ def train(cmd_args):
 
   # for Kinship / UW-CSE / Cora data
   elif cmd_args.load_method == 0:
-    for current_epoch in range(cmd_args.num_epochs):
+    columns = ['Epoch', 'Train Loss', 'Test AUC-ROC', 'Test AUC-PR', 'Test Log Prob']
+    results_df = pd.DataFrame(columns=columns)
+    for current_epoch in range(30):
       pbar = tqdm(range(cmd_args.num_batches))
       acc_loss = 0.0
 
@@ -411,6 +415,14 @@ def train(cmd_args):
         auc_roc = roc_auc_score(label, posterior_prob.numpy())
         auc_pr = average_precision_score(label, posterior_prob.numpy())
 
+        results_df = pd.concat([results_df, pd.DataFrame({
+        'Epoch': [current_epoch],
+        'Train Loss': [acc_loss / cmd_args.num_batches],
+        'Test AUC-ROC': [auc_roc],
+        'Test AUC-PR': [auc_pr],
+        'Test Log Prob': [test_log_prob]
+        })], ignore_index=True)
+
         tqdm.write('Epoch: %d, train loss: %.4f, test auc-roc: %.4f, test auc-pr: %.4f, test log prob: %.4f' % (
           current_epoch, acc_loss / cmd_args.num_batches, auc_roc, auc_pr, test_log_prob))
         # tqdm.write(str(posterior_prob[:10]))
@@ -447,6 +459,8 @@ def train(cmd_args):
       #   tqdm.write('Early stopping')
       #   break
 
+    results_df.to_csv("./exp/kinship/" + str(datetime.now().strftime("%Y-%m-%d_%H:%M:%S")) + "training_results.csv", index=False)
+    
     # evaluation after training
     node_embeds = gcn(dataset)
     with torch.no_grad():
