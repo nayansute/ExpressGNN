@@ -365,7 +365,7 @@ def train(cmd_args):
   elif cmd_args.load_method == 0:
     columns = ['Epoch', 'Train Loss', 'Test AUC-ROC', 'Test AUC-PR', 'Test Log Prob']
     results_df = pd.DataFrame(columns=columns)
-    for current_epoch in range(cmd_args.num_epochs):
+    for current_epoch in range(30):
       pbar = tqdm(range(cmd_args.num_batches))
       acc_loss = 0.0
 

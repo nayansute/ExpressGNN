@@ -1,19 +1,21 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-import argparse
+# import argparse
 
 # Load the CSV file into a DataFrame
 
 # Create an argument parser
-parser = argparse.ArgumentParser(description='Description of your script.')
-parser.add_argument('arg1', type=str, help='Description of arg1')
-args = parser.parse_args()
-print(f"arg1: {args.arg1}")
+# parser = argparse.ArgumentParser(description='Description of your script.')
+# parser.add_argument('arg1', type=str, help='Description of arg1')
+# parser.add_argument('arg2', type=str, help='Description of arg2')
+# args = parser.parse_args()
+# print(f"arg1: {args.arg1}")
+# print(f"arg2: {args.arg2}")
 
 # Define command-line arguments
-file_path = "exp/kinship/" + str(args.arg1)  # Replace 'your_file_path.csv' with the actual file path
-df1 = pd.read_csv("./exp/kinship/2024-02-04_15:44:23training_results.csv") # original performance
-df2 = pd.read_csv(file_path)
+# file_path = "exp/kinship/" + str(args.arg1)  # Replace 'your_file_path.csv' with the actual file path
+df1 = pd.read_csv("./exp/kinship/2024-02-04_21_27_40training_results.csv") # original performance
+df2 = pd.read_csv("./exp/kinship/2024-02-04_21:17:08training_results.csv")
 
 # Plotting
 plt.figure(figsize=(10, 6))
@@ -36,6 +38,6 @@ plt.xlabel('Epoch')
 plt.ylabel('Value')
 plt.legend()
 plt.grid(True)
-plt.savefig("exp/kinship/comparisons/" + str(args.arg1)[:-4] + ".png", bbox_inches='tight')
+plt.savefig("cora_comparison30.png", bbox_inches='tight')
 # Show the plot
 plt.show()
