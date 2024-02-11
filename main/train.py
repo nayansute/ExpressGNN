@@ -460,7 +460,7 @@ def train(cmd_args):
       #   tqdm.write('Early stopping')
       #   break
 
-    results_df.to_csv("./exp/kinship/" + str(datetime.now().strftime("%Y-%m-%d_%H:%M:%S")) + "training_results.csv", index=False)
+    results_df.to_csv("./cora_results/" + str(datetime.now().strftime("%Y-%m-%d_%H:%M:%S")) + "training_results.csv", index=False)
     # evaluation after training
     node_embeds = gcn(dataset)
     with torch.no_grad():
