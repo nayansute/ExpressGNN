@@ -88,11 +88,11 @@ class GCN(nn.Module):
 
     self.MLPs = nn.ModuleList()
     for _ in range(self.num_hops):
-      self.MLPs.append(nn.Sequential(
-          nn.Dropout(0.5),  # Adjust the dropout rate as needed
-          MLP(input_size=self.latent_dim, num_layers=self.num_layers,
-              hidden_size=self.latent_dim, output_size=self.latent_dim)
-      ))
+        self.MLPs.append(nn.Sequential(
+            nn.Dropout(0.5),  # Adjust the dropout rate as needed
+            MLP(input_size=self.latent_dim, num_layers=self.num_layers,
+                hidden_size=self.latent_dim, output_size=self.latent_dim)
+        ))
 
     self.edge_type_W = nn.ModuleList()
     for _ in range(self.num_edge_types):
