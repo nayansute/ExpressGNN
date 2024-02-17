@@ -4,7 +4,6 @@ from common.predicate import PRED_DICT
 from itertools import product
 import torch.nn.functional as F
 
-
 class ConditionalMLN(nn.Module):
   
   def __init__(self, cmd_args, rule_list):
@@ -25,14 +24,111 @@ class ConditionalMLN(nn.Module):
       self.rule_weights_lin.weight = nn.Parameter(
         torch.tensor([[rule.weight for rule in rule_list]], dtype=torch.float))
       print('rule weights set to pre-defined values, learning weights\n')
+
+  def gibbs_sampling(self, latent_var_inds, posterior_prob, num_samples=10):
+    """
+    Perform Gibbs Sampling to approximate the posterior distribution.
+
+    :param latent_var_inds: Indices of latent variables.
+    :param posterior_prob: Posterior probability of latent variables.
+    :param num_samples: Number of Gibbs samples to generate.
+    :return: Approximated samples from the posterior distribution.
+    """
+    samples = []
+    for _ in range(num_samples):
+      # Initialize sample randomly or based on some heuristics
+      sample = torch.randint(2, size=(len(latent_var_inds),), dtype=torch.float)
+      
+      for i in range(len(latent_var_inds)):
+        # Gibbs update: Sample each variable conditioned on others
+        prob_distribution = torch.softmax(self.alpha_table[latent_var_inds], dim=0)
+        sample[i] = torch.multinomial(prob_distribution, 1).float()
+
+      samples.append(sample)
+
+    return torch.stack(samples)
   
+  def forward_with_gibbs(self, neg_mask_ls_ls, latent_var_inds_ls_ls, observed_rule_cnts, posterior_prob, flat_list,
+                         observed_vars_ls_ls, gibbs_samples=10):
+    """
+    Compute the MLN potential using Gibbs Sampling.
+
+    :param neg_mask_ls_ls:
+    :param posterior_prob_ls_ls:
+    :param gibbs_samples: Number of Gibbs samples to use.
+    :return:
+    """
+    scores = torch.zeros(self.num_rules, dtype=torch.float)
+
+    if self.soft_logic:
+      pred_name_ls = [e[0] for e in flat_list]
+      pred_ind_flat_list = [self.predname2ind[pred_name] for pred_name in pred_name_ls]
+    
+    for i in range(len(neg_mask_ls_ls)):
+      neg_mask_ls = neg_mask_ls_ls[i]
+      latent_var_inds_ls = latent_var_inds_ls_ls[i]
+      observed_vars_ls = observed_vars_ls_ls[i]
+
+      for j in range(len(neg_mask_ls)):
+        latent_neg_mask, observed_neg_mask = neg_mask_ls[j]
+        latent_var_inds = latent_var_inds_ls[j]
+        observed_vars = observed_vars_ls[j]
+
+        # Gibbs Sampling to approximate the posterior distribution
+        gibbs_samples = self.gibbs_sampling(latent_var_inds, posterior_prob, num_samples=gibbs_samples)
+
+        # Calculate scores using the generated Gibbs samples
+        for gibbs_sample in gibbs_samples:
+          cartesian_prod = torch.clone(posterior_prob[latent_var_inds].unsqueeze(0))
+
+          if self.soft_logic:
+            # observed alpha
+            obs_vals = [e[0] for e in observed_vars]
+            pred_names = [e[1] for e in observed_vars]
+            pred_inds = [self.predname2ind[pn] for pn in pred_names]
+            alpha = self.alpha_table[pred_inds]  # alphas in this formula
+            act_alpha = torch.sigmoid(alpha)
+            obs_neg_flag = [(1 if observed_vars[i] != observed_neg_mask[i] else 0)
+                            for i in range(len(observed_vars))]
+            tn_obs_neg_flag = torch.tensor(obs_neg_flag, dtype=torch.float)
+
+            val = torch.abs(1 - torch.tensor(obs_vals, dtype=torch.float) - act_alpha)
+            obs_score = torch.abs(tn_obs_neg_flag - val)
+
+            # latent alpha
+            inds = product(*[[0, 1] for _ in range(len(latent_neg_mask))])
+            pred_inds = [pred_ind_flat_list[i] for i in latent_var_inds]
+            alpha = self.alpha_table[pred_inds]  # alphas in this formula
+            act_alpha = torch.sigmoid(alpha)
+            tn_latent_neg_mask = torch.tensor(latent_neg_mask, dtype=torch.float)
+
+            for ind in inds:
+              val = torch.abs(1 - torch.tensor(ind, dtype=torch.float) - act_alpha)
+              val = torch.abs(tn_latent_neg_mask - val)
+              cartesian_prod[tuple(ind)] *= torch.max(torch.cat([val, obs_score], dim=0))
+
+          else:
+            if sum(observed_neg_mask) == 0:
+              cartesian_prod[tuple(latent_neg_mask)] = 0.0
+
+          scores[i] += cartesian_prod.sum()
+
+      scores[i] += observed_rule_cnts[i]
+
+    return self.rule_weights_lin(scores)
+
   def forward(self, neg_mask_ls_ls, latent_var_inds_ls_ls, observed_rule_cnts, posterior_prob, flat_list,
               observed_vars_ls_ls):
     """
-        compute the MLN potential given the posterior probability of latent variables
-    :param neg_mask_ls_ls:
-    :param posterior_prob_ls_ls:
-    :return:
+    Compute the MLN potential given the posterior probability of latent variables.
+
+    :param neg_mask_ls_ls: List of negation masks.
+    :param latent_var_inds_ls_ls: List of lists containing indices of latent variables.
+    :param observed_rule_cnts: List of observed rule counts.
+    :param posterior_prob: Posterior probability of latent variables.
+    :param flat_list: Flat list of observed variables and their values.
+    :param observed_vars_ls_ls: List of lists containing observed variables.
+    :return: MLN potential.
     """
     
     scores = torch.zeros(self.num_rules, dtype=torch.float)
@@ -46,7 +142,7 @@ class ConditionalMLN(nn.Module):
       latent_var_inds_ls = latent_var_inds_ls_ls[i]
       observed_vars_ls = observed_vars_ls_ls[i]
       
-      # sum of scores from gnd rules with latent vars
+      # sum of scores from ground rules with latent vars
       for j in range(len(neg_mask_ls)):
         
         latent_neg_mask, observed_neg_mask = neg_mask_ls[j]
@@ -99,7 +195,7 @@ class ConditionalMLN(nn.Module):
         
         scores[i] += cartesian_prod.sum()
       
-      # sum of scores from gnd rule with only observed vars
+      # sum of scores from ground rule with only observed vars
       scores[i] += observed_rule_cnts[i]
     
     return self.rule_weights_lin(scores)
@@ -117,7 +213,7 @@ class ConditionalMLN(nn.Module):
       latent_var_inds_ls = latent_var_inds_ls_ls[i]
       observed_vars_ls = observed_vars_ls_ls[i]
       
-      # sum of scores from gnd rules with latent vars
+      # sum of scores from ground rules with latent vars
       for j in range(len(neg_mask_ls)):
         
         latent_neg_mask, observed_neg_mask = neg_mask_ls[j]
