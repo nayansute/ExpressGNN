@@ -16,5 +16,5 @@ file_path2 = "./cora_results/" + str(args.arg2)
 df1 = pd.read_csv(file_path1) # original performance
 df2 = pd.read_csv(file_path2)
 
-print(np.average(np.array(df1["Test AUC-PR"])))
-print(np.average(np.array(df2["Test AUC-PR"])))
+print(file_path1, np.average(np.array(df1["Test AUC-PR"])))
+print(file_path2, np.average(np.array(df2["Test AUC-PR"])))
