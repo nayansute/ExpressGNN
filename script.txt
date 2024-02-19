@@ -1441,6 +1441,8 @@ Remember the code:
 
 ***************************
 
+continuation:
+
     def train(cmd_args):
         if not os.path.exists(cmd_args.exp_path):
             os.makedirs(cmd_args.exp_path)
@@ -1883,6 +1885,8 @@ Remember the code:
             tqdm.write('test auc-roc: %.4f, test auc-pr: %.4f, test log prob: %.4f' % (auc_roc, auc_pr, test_log_prob))
 
 ******************************
+
+continuation:
 
     def compute_entropy(posterior_prob):
         eps = 1e-6

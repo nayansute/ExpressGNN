@@ -9,10 +9,11 @@ class KnowledgeGraph(object):
     self.dataset = dataset
     self.graph, self.edge_type2idx, \
         self.ent2idx, self.idx2ent, self.rel2idx, self.idx2rel, \
-        self.node2idx, self.idx2node = gen_graph(facts, predicates, dataset)
+        self.node2idx, self.idx2node, self.ent2type, self.idx2type = gen_graph(facts, predicates, dataset)
     
     self.num_ents = len(self.ent2idx)
     self.num_rels = len(self.rel2idx)
+    self.num_types = len(set(self.ent2type.values()))
     
     self.num_nodes = len(self.graph.nodes())
     self.num_edges = len(self.graph.edges())
@@ -41,27 +42,42 @@ def gen_index(facts, predicates, dataset):
       rel2idx[rel] = idx_rel
       idx_rel += 1
   idx2rel = dict(zip(rel2idx.values(), rel2idx.keys()))
-  
-  ent2idx = dict()
-  idx_ent = 0
-  for type_name in sorted(dataset.const_sort_dict.keys()):
-    for const in dataset.const_sort_dict[type_name]:
-      ent2idx[const] = idx_ent
-      idx_ent += 1
-  idx2ent = dict(zip(ent2idx.values(), ent2idx.keys()))
-  
-  node2idx = ent2idx.copy()
-  idx_node = len(node2idx)
-  for rel in sorted(facts.keys()):
-    for fact in sorted(list(facts[rel])):
-      val, args = fact
-      if (rel, args) not in node2idx:
-        node2idx[(rel, args)] = idx_node
-        idx_node += 1
-  idx2node = dict(zip(node2idx.values(), node2idx.keys()))
-  
-  return ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node
 
+  ent2idx, idx2ent, node2idx, idx2node, ent2type, idx2type = gen_entity_info(facts, predicates, dataset)
+
+  return ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node, ent2type, idx2type
+
+def gen_entity_info(facts, predicates, dataset):
+    ent2type, idx2type = gen_type_info(dataset)
+
+    ent2idx = dict()
+    idx_ent = 0
+    for type_name in sorted(dataset.const_sort_dict.keys()):
+        for const in dataset.const_sort_dict[type_name]:
+            ent2idx[const] = idx_ent
+            idx_ent += 1
+    idx2ent = dict(zip(ent2idx.values(), ent2idx.keys()))
+
+    node2idx = ent2idx.copy()
+    idx_node = len(node2idx)
+    for rel in sorted(facts.keys()):
+        for fact in sorted(list(facts[rel])):
+            val, args = fact
+            if (rel, args) not in node2idx:
+                node2idx[(rel, args)] = idx_node
+                idx_node += 1
+    idx2node = dict(zip(node2idx.values(), node2idx.keys()))
+
+    return ent2idx, idx2ent, node2idx, idx2node, ent2type, idx2type
+
+def gen_type_info(dataset):
+    ent2type = dict()
+    idx2type = dict()
+    for type_name in sorted(dataset.const_sort_dict.keys()):
+        for const in dataset.const_sort_dict[type_name]:
+            ent2type[const] = type_name
+            idx2type[ent2type[const]] = const
+    return ent2type, idx2type
 
 def gen_edge_type():
   edge_type2idx = dict()
@@ -95,8 +111,7 @@ def gen_graph(facts, predicates, dataset):
   
   # build bipartite graph (constant nodes and hyper predicate nodes)
   g = nx.Graph()
-  ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node = gen_index(facts, predicates, dataset)
-
+  ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node, ent2type, idx2type = gen_index(facts, predicates, dataset)
   edge_type2idx = gen_edge_type()
   
   for node_idx in idx2node:
@@ -110,4 +125,4 @@ def gen_graph(facts, predicates, dataset):
         pos_code = ''.join(['%d' % (arg == v) for v in args])
         g.add_edge(fact_node_idx, node2idx[arg],
                    edge_type=edge_type2idx[(val, pos_code)])
-  return g, edge_type2idx, ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node
+  return g, edge_type2idx, ent2idx, idx2ent, rel2idx, idx2rel, node2idx, idx2node, ent2type, idx2type
