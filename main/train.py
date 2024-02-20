@@ -365,7 +365,7 @@ def train(cmd_args):
   elif cmd_args.load_method == 0:
     columns = ['Epoch', 'Train Loss', 'Test AUC-ROC', 'Test AUC-PR', 'Test Log Prob']
     results_df = pd.DataFrame(columns=columns)
-    for current_epoch in range(cmd_args.num_epochs):
+    for current_epoch in range(30):
       pbar = tqdm(range(cmd_args.num_batches))
       acc_loss = 0.0
 
@@ -442,24 +442,7 @@ def train(cmd_args):
       
       valid_log_prob = float(np.sum(np.log(np.clip(np.abs((1 - valid_label) - valid_prob.numpy()), 1e-6, 1 - 1e-6))))
       
-      # tqdm.write('epoch: %d, valid log prob: %.4f' % (current_epoch, valid_log_prob))
-      # 
-      # should_stop = monitor.update(-valid_log_prob)
-      # scheduler.step(valid_log_prob)
-      # 
-      # is_current_best = monitor.cnt == 0
-      # if is_current_best:
-      #   savepath = joinpath(cmd_args.exp_path, 'saved_model')
-      #   os.makedirs(savepath, exist_ok=True)
-      #   torch.save(gcn.state_dict(), joinpath(savepath, 'gcn.model'))
-      #   torch.save(posterior_model.state_dict(), joinpath(savepath, 'posterior.model'))
-      #
-      # should_stop = should_stop or (current_epoch + 1 == cmd_args.num_epochs)
-      #
-      # if should_stop:
-      #   tqdm.write('Early stopping')
-      #   break
-
+   
     results_df.to_csv("./cora_results/" + str(datetime.now().strftime("%Y-%m-%d_%H:%M:%S")) + "training_results.csv", index=False)
     # evaluation after training
     node_embeds = gcn(dataset)
@@ -500,3 +483,4 @@ if __name__ == '__main__':
   torch.manual_seed(cmd_args.seed)
 
   train(cmd_args)
+  

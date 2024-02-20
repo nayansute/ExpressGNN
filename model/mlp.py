@@ -23,3 +23,4 @@ class MLP(nn.Module):
     output = self.output_linear(h)
     
     return output
+  
