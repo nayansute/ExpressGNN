@@ -20,6 +20,8 @@ class FactorizedPosterior(nn.Module):
     self.ent2idx = graph.ent2idx
     self.rel2idx = graph.rel2idx
     self.idx2rel = graph.idx2rel
+    self.ent2type = graph.ent2type  # Added for handling entity types
+    self.idx2type = graph.idx2type  # Added for handling entity types
 
     if cmd_args.load_method == 1:
       self.params_u_R = nn.ModuleList()
@@ -143,7 +145,7 @@ class FactorizedPosterior(nn.Module):
     elif batch_mode:
       assert cmd_args.load_method == 1
 
-      pred_name, x_mat, invx_mat, sample_mat = latent_vars
+      pred_name, x_mat, invx_mat, sample_mat, types = latent_vars  # Added types for handling entity types
 
       rel_idx = self.rel2idx[pred_name]
 
@@ -168,7 +170,7 @@ class FactorizedPosterior(nn.Module):
       probas_head = torch.sigmoid(head_score)
       probas_true = torch.sigmoid(true_score)
 
-      return probas_tail, probas_head, probas_true
+      return probas_tail, probas_head, probas_true, types
 
     else:
       assert cmd_args.load_method == 0
