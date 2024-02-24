@@ -15,10 +15,10 @@ class MLP(nn.Module):
     self.output_linear = nn.Linear(hidden_size, output_size)
 
   def forward(self, x):
-    h = F.relu(self.input_linear(x))
+    h = F.leaky_relu(self.input_linear(x))
     
     for layer in self.hidden:
-      h = F.relu(layer(h))
+      h = F.leaky_relu(layer(h))
     
     output = self.output_linear(h)
     
