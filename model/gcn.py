@@ -6,6 +6,17 @@ from model.mlp import MLP
 from common.cmd_args import cmd_args
 
 
+class GraphSAGE(nn.Module):
+  def __init__(self, in_dim, out_dim):
+    super(GraphSAGE, self).__init__()
+    self.in_dim = in_dim
+    self.out_dim = out_dim
+    self.aggregator = nn.Linear(in_dim * 2, out_dim)
+
+  def forward(self, nodes, neighbor_embeds):
+    aggregated = torch.cat([nodes, neighbor_embeds], dim=1)
+    return F.relu(self.aggregator(aggregated))
+
 def prepare_node_feature(graph, transductive=True):
   if transductive:
     node_feat = torch.zeros(graph.num_nodes,                          # for transductive GCN
@@ -85,6 +96,8 @@ class GCN(nn.Module):
     self.edge2node_out = self.edge2node_out.to(cmd_args.device)
     self.edge_type_masks = [mask.to(cmd_args.device) for mask in self.edge_type_masks]
     self.edge_direction_masks = [mask.to(cmd_args.device) for mask in self.edge_direction_masks]
+    
+    self.sage_aggregator = GraphSAGE(latent_dim, latent_dim)
 
     self.MLPs = nn.ModuleList()
     for _ in range(self.num_hops):
@@ -157,7 +170,8 @@ class GCN(nn.Module):
     hop = 0
     hidden = node_embeds
     while hop < self.num_hops:
-      node_aggregate = torch.zeros_like(hidden)
+      # GraphSAGE Aggregation
+      aggregated_neighbors = torch.zeros_like(hidden)
       for edge_type in set(self.graph.edge_types):
         for direction in range(2):
           W = self.edge_type_W[edge_type][hop][direction]
@@ -165,9 +179,11 @@ class GCN(nn.Module):
           nodes_attached_on_edges_out = torch.gather(W_nodes, 0, self.edge2node_out)
           nodes_attached_on_edges_out *= self.edge_type_masks[edge_type].view(-1, 1)
           nodes_attached_on_edges_out *= self.edge_direction_masks[direction].view(-1, 1)
-          node_aggregate.scatter_add_(0, self.edge2node_in, nodes_attached_on_edges_out)
+          aggregated_neighbors.scatter_add_(0, self.edge2node_in, nodes_attached_on_edges_out)
+      # GraphSAGE Aggregator
+      hidden = self.sage_aggregator(hidden, aggregated_neighbors)
 
-      hidden = self.MLPs[hop](hidden + node_aggregate)
+      hidden = self.MLPs[hop](hidden)
       hop += 1
 
     read_out_const_nodes_embed = torch.cat((hidden[self.const_nodes], self.const_nodes_free_params), dim=1)
