@@ -7,16 +7,15 @@ from common.cmd_args import cmd_args
 
 
 class GraphSAGE(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super(GraphSAGE, self).__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.aggregator = nn.Linear(in_dim * 2, out_dim)
+  def __init__(self, in_dim, out_dim):
+    super(GraphSAGE, self).__init__()
+    self.in_dim = in_dim
+    self.out_dim = out_dim
+    self.aggregator = nn.Linear(in_dim * 2, out_dim)
 
-    def forward(self, nodes, neighbor_embeds):
-        aggregated = torch.cat([nodes, neighbor_embeds], dim=1)
-        return F.relu(self.aggregator(aggregated))
-
+  def forward(self, nodes, neighbor_embeds):
+    aggregated = torch.cat([nodes, neighbor_embeds], dim=1)
+    return F.relu(self.aggregator(aggregated))
 
 def prepare_node_feature(graph, transductive=True):
   if transductive:
