@@ -13,9 +13,9 @@ parser.add_argument('arg3', type=str, help='Description of arg3')
 args = parser.parse_args()
 
 # Define command-line arguments
-file_path1 = "./cora_results/GAT/" + str(args.arg1)  # Replace 'your_file_path.csv' with the actual file path
-file_path2 = "./cora_results/GIN/" + str(args.arg2)
-file_path3 = "./cora_results/Original_results/" + str(args.arg3)
+file_path1 = "./kinship_results/GAT/" + str(args.arg1)  # Replace 'your_file_path.csv' with the actual file path
+file_path2 = "./kinship_results/GIN/" + str(args.arg2)
+file_path3 = "./kinship_results/Original/" + str(args.arg3)
 
 
 df1 = pd.read_csv(file_path1) # original performance
