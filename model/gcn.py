@@ -32,6 +32,32 @@ def prepare_node_feature(graph, transductive=True):
   
   return node_feat, torch.LongTensor(const_nodes)
 
+class GATLayer(nn.Module):
+  def __init__(self, in_dim, out_dim, num_heads, dropout):
+    super(GATLayer, self).__init__()
+    self.in_dim = in_dim
+    self.out_dim = out_dim
+    self.num_heads = num_heads
+    self.dropout = dropout
+
+    self.W = nn.ModuleList([nn.Linear(in_dim, out_dim) for _ in range(num_heads)])
+    self.attention_weights = nn.Parameter(torch.Tensor(num_heads, 2 * out_dim))
+    self.dropout_layer = nn.Dropout(dropout)
+
+  def forward(self, nodes, neighbor_embeds):
+    node_embeddings = torch.stack([W(nodes) for W in self.W], dim=1)  # (N, num_heads, out_dim)
+    neighbor_embeddings = neighbor_embeds.unsqueeze(1).expand(-1, self.num_heads, -1)  # (N, num_heads, out_dim)
+
+    combined_embeddings = torch.cat([node_embeddings, neighbor_embeddings], dim=-1)  # (N, num_heads, 2 * out_dim)
+    attention_scores = F.leaky_relu(torch.einsum('nhd,hd->nh', combined_embeddings, self.attention_weights),
+                                    negative_slope=0.2)  # (N, num_heads)
+
+    attention_weights = F.softmax(attention_scores, dim=1)  # (N, num_heads)
+    attention_weights = self.dropout_layer(attention_weights)
+    
+    output_embeddings = torch.einsum('nhd,nh->nd', node_embeddings, attention_weights)  # (N, out_dim)
+
+    return output_embeddings
 
 class TrainableEmbedding(nn.Module):
   def __init__(self, graph, latent_dim):
@@ -87,10 +113,14 @@ class GCN(nn.Module):
     self.edge_direction_masks = [mask.to(cmd_args.device) for mask in self.edge_direction_masks]
 
     self.MLPs = nn.ModuleList()
+    self.GATLayers = nn.ModuleList()
+
     for _ in range(self.num_hops):
       self.MLPs.append(MLP(input_size=self.latent_dim, num_layers=self.num_layers,
                            hidden_size=self.latent_dim, output_size=self.latent_dim))
-    
+      self.GATLayers.append(GATLayer(in_dim=self.latent_dim, out_dim=self.latent_dim,
+                                     num_heads=4, dropout=0.5))
+
     self.edge_type_W = nn.ModuleList()
     for _ in range(self.num_edge_types):
       ml_edge_type = nn.ModuleList()
@@ -166,6 +196,10 @@ class GCN(nn.Module):
           nodes_attached_on_edges_out *= self.edge_type_masks[edge_type].view(-1, 1)
           nodes_attached_on_edges_out *= self.edge_direction_masks[direction].view(-1, 1)
           node_aggregate.scatter_add_(0, self.edge2node_in, nodes_attached_on_edges_out)
+
+       # Apply Graph Attention Layer
+      gat_layer = self.GATLayers[hop]
+      node_aggregate = gat_layer(hidden, node_aggregate)
 
       hidden = self.MLPs[hop](hidden + node_aggregate)
       hop += 1
