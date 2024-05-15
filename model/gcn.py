@@ -101,6 +101,9 @@ class GCN(nn.Module):
         ml_edge_type.append(ml_hop)
       self.edge_type_W.append(ml_edge_type)
     
+    # Define GIN parameters
+    self.gin_linear = nn.ModuleList([nn.Linear(latent_dim, latent_dim) for _ in range(num_hops)])
+    self.gin_eps = nn.Parameter(torch.Tensor([0.0] * num_hops))  # Epsilon parameter for GIN aggregation
     self.const_nodes_free_params = nn.Parameter(nn.init.kaiming_uniform_(torch.zeros(self.num_ents, free_dim)))
 
     
@@ -157,6 +160,8 @@ class GCN(nn.Module):
     hop = 0
     hidden = node_embeds
     while hop < self.num_hops:
+      hidden_gin = F.relu(self.gin_linear[hop](hidden) + self.gin_eps[hop])
+      hidden = self.MLPs[hop](hidden + hidden_gin)
       node_aggregate = torch.zeros_like(hidden)
       for edge_type in set(self.graph.edge_types):
         for direction in range(2):
